@@ -27,6 +27,27 @@ public sealed class ShellContext
     public string CurrentDirectory { get; set; } = Directory.GetCurrentDirectory();
 
     /// <summary>
+    /// Positional parameters: $1, $2, ..., $9.
+    /// Set via script arguments or the <c>set --</c> command.
+    /// </summary>
+    private List<string> _positionalParams = [];
+
+    /// <summary>
+    /// The shell name ($0) — typically "radiance" or the script path.
+    /// </summary>
+    public string ShellName { get; set; } = "radiance";
+
+    /// <summary>
+    /// PID of the last background process ($!). Returns 0 if no background process.
+    /// </summary>
+    public int LastBackgroundPid { get; set; } = 0;
+
+    /// <summary>
+    /// Shell options ($-) — currently a placeholder for future use.
+    /// </summary>
+    public string ShellOptions { get; set; } = "";
+
+    /// <summary>
     /// Sets a shell variable. If it is already exported, it also updates the environment.
     /// </summary>
     /// <param name="name">The variable name.</param>
@@ -107,4 +128,39 @@ public sealed class ShellContext
     /// Gets all exported variable names.
     /// </summary>
     public IEnumerable<string> ExportedVariableNames => _exportedVars;
+
+    // ──── Positional Parameters ────
+
+    /// <summary>
+    /// Sets the positional parameters ($1, $2, ...).
+    /// Typically called from <c>set --</c> or when running a script with arguments.
+    /// </summary>
+    /// <param name="args">The positional parameter values.</param>
+    public void SetPositionalParams(List<string> args)
+    {
+        _positionalParams = new List<string>(args);
+    }
+
+    /// <summary>
+    /// Gets a positional parameter by index (1-based).
+    /// Returns empty string if the index is out of range.
+    /// </summary>
+    /// <param name="index">1-based positional parameter index.</param>
+    /// <returns>The parameter value, or empty string.</returns>
+    public string GetPositionalParam(int index)
+    {
+        if (index < 1 || index > _positionalParams.Count)
+            return string.Empty;
+        return _positionalParams[index - 1];
+    }
+
+    /// <summary>
+    /// Gets the count of positional parameters ($#).
+    /// </summary>
+    public int PositionalParamCount => _positionalParams.Count;
+
+    /// <summary>
+    /// Gets all positional parameters ($@ / $*).
+    /// </summary>
+    public IReadOnlyList<string> PositionalParams => _positionalParams.AsReadOnly();
 }

@@ -39,7 +39,7 @@ public static class SimpleTokenizer
                 }
 
                 if (i < input.Length) i++; // skip closing quote
-                tokens.Add(new Token(TokenType.String, sb.ToString()));
+                tokens.Add(new Token(TokenType.SingleQuotedString, sb.ToString()));
                 continue;
             }
 
@@ -66,7 +66,7 @@ public static class SimpleTokenizer
                 }
 
                 if (i < input.Length) i++; // skip closing quote
-                tokens.Add(new Token(TokenType.String, sb.ToString()));
+                tokens.Add(new Token(TokenType.DoubleQuotedString, sb.ToString()));
                 continue;
             }
 

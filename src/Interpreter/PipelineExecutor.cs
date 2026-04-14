@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using Radiance.Builtins;
+using Radiance.Expansion;
 using Radiance.Lexer;
 using Radiance.Parser.Ast;
 
@@ -16,6 +17,7 @@ public sealed class PipelineExecutor
     private readonly BuiltinRegistry _builtins;
     private readonly ProcessManager _processManager;
     private readonly ShellInterpreter _interpreter;
+    private readonly Expander _expander;
 
     /// <summary>
     /// Creates a new pipeline executor.
@@ -24,16 +26,19 @@ public sealed class PipelineExecutor
     /// <param name="builtins">The builtin command registry.</param>
     /// <param name="processManager">The external process manager.</param>
     /// <param name="interpreter">The shell interpreter (for executing builtins).</param>
+    /// <param name="expander">The expansion engine (for word expansion).</param>
     public PipelineExecutor(
         ShellContext context,
         BuiltinRegistry builtins,
         ProcessManager processManager,
-        ShellInterpreter interpreter)
+        ShellInterpreter interpreter,
+        Expander expander)
     {
         _context = context;
         _builtins = builtins;
         _processManager = processManager;
         _interpreter = interpreter;
+        _expander = expander;
     }
 
     /// <summary>
@@ -63,7 +68,7 @@ public sealed class PipelineExecutor
     /// </summary>
     private int ExecuteSingleWithRedirects(SimpleCommandNode cmd)
     {
-        // Resolve redirects
+        // Resolve redirects (expand redirect target paths)
         var stdinFile = GetStdinRedirect(cmd);
         var stdoutRedirect = GetStdoutRedirect(cmd);
 
@@ -95,15 +100,15 @@ public sealed class PipelineExecutor
                     FileShare.None);
             }
 
-            // Expand words
+            // Expand words using the full expansion pipeline
             var expandedWords = ExpandWords(cmd);
 
-            if (expandedWords.Length == 0)
+            if (expandedWords.Count == 0)
             {
                 // No command, just assignments
                 foreach (var assignment in cmd.Assignments)
                 {
-                    var value = _interpreter.ExpandVariables(assignment.Value);
+                    var value = _expander.ExpandString(assignment.Value);
                     _context.SetVariable(assignment.Name, value);
                 }
 
@@ -115,11 +120,11 @@ public sealed class PipelineExecutor
             // Check if it's a builtin
             if (_builtins.IsBuiltin(commandName))
             {
-                exitCode = ExecuteBuiltinWithRedirects(cmd, expandedWords, stdinStream, stdoutStream);
+                exitCode = ExecuteBuiltinWithRedirects(cmd, expandedWords.ToArray(), stdinStream, stdoutStream);
             }
             else
             {
-                exitCode = ExecuteExternalWithRedirects(commandName, expandedWords, stdinStream, stdoutStream);
+                exitCode = ExecuteExternalWithRedirects(commandName, expandedWords.ToArray(), stdinStream, stdoutStream);
             }
         }
         catch (FileNotFoundException ex)
@@ -173,7 +178,7 @@ public sealed class PipelineExecutor
                 var cmd = commands[i];
                 var expandedWords = ExpandWords(cmd);
 
-                if (expandedWords.Length == 0)
+                if (expandedWords.Count == 0)
                 {
                     builtinResults[i] = (true, 0, null);
                     continue;
@@ -234,7 +239,7 @@ public sealed class PipelineExecutor
 
                         // Handle stdin for builtin — read all available data
                         // (builtins don't typically read stdin, but support it)
-                        _ = _builtins.TryExecute(commandName, expandedWords, _context, out var exitCode);
+                        _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out var exitCode);
                         builtinResults[i] = (true, exitCode, capturedOutput.ToString());
                     }
                     finally
@@ -271,7 +276,7 @@ public sealed class PipelineExecutor
                     // External command
                     var process = _processManager.StartProcess(
                         commandName,
-                        expandedWords,
+                        expandedWords.ToArray(),
                         _context,
                         stdinStream,
                         stdoutStream);
@@ -415,9 +420,6 @@ public sealed class PipelineExecutor
         Stream? stdinStream,
         Stream? stdoutStream)
     {
-        // Process prefix assignments as permanent (temporary env in Phase 4)
-        // This is handled by the caller before expanding words.
-
         var process = _processManager.StartProcess(
             commandName,
             expandedWords,
@@ -440,33 +442,40 @@ public sealed class PipelineExecutor
     // ──── Helper Methods ────
 
     /// <summary>
-    /// Expands all words in a command node using the interpreter's variable expansion.
+    /// Expands all words in a command node using the full expansion pipeline
+    /// (tilde, variable, command substitution, arithmetic, glob).
+    /// Also processes prefix assignments.
     /// </summary>
-    private string[] ExpandWords(SimpleCommandNode cmd)
+    private List<string> ExpandWords(SimpleCommandNode cmd)
     {
         // Process assignments first
         foreach (var assignment in cmd.Assignments)
         {
-            var value = _interpreter.ExpandVariables(assignment.Value);
+            var value = _expander.ExpandString(assignment.Value);
             _context.SetVariable(assignment.Name, value);
         }
 
-        return cmd.Words.Select(w => _interpreter.ExpandVariables(w)).ToArray();
+        return _expander.ExpandWords(cmd.Words);
     }
 
     /// <summary>
-    /// Gets the stdin redirect filename, if any.
+    /// Expands the redirect target and gets the stdin redirect filename, if any.
     /// </summary>
-    private static string? GetStdinRedirect(SimpleCommandNode cmd)
+    private string? GetStdinRedirect(SimpleCommandNode cmd)
     {
         var redirect = cmd.Redirects.FirstOrDefault(r => r.RedirectType == TokenType.LessThan);
-        return redirect?.Target;
+        if (redirect is null)
+            return null;
+
+        // Expand the redirect target word parts
+        var expanded = _expander.ExpandWord(redirect.Target);
+        return expanded.Count > 0 ? expanded[0] : null;
     }
 
     /// <summary>
-    /// Gets the stdout redirect details (filename + append flag), if any.
+    /// Expands the redirect target and gets the stdout redirect details, if any.
     /// </summary>
-    private static (string file, bool append)? GetStdoutRedirect(SimpleCommandNode cmd)
+    private (string file, bool append)? GetStdoutRedirect(SimpleCommandNode cmd)
     {
         var redirect = cmd.Redirects.FirstOrDefault(r =>
             r.RedirectType is TokenType.GreaterThan or TokenType.DoubleGreaterThan);
@@ -474,7 +483,12 @@ public sealed class PipelineExecutor
         if (redirect is null)
             return null;
 
+        // Expand the redirect target word parts
+        var expanded = _expander.ExpandWord(redirect.Target);
+        if (expanded.Count == 0)
+            return null;
+
         var append = redirect.RedirectType == TokenType.DoubleGreaterThan;
-        return (redirect.Target, append);
+        return (expanded[0], append);
     }
 }

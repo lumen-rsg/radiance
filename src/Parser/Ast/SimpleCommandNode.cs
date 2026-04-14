@@ -16,8 +16,9 @@ public sealed record SimpleCommandNode : AstNode
 
     /// <summary>
     /// The command words (command name + arguments), before expansion.
+    /// Each word is a list of <see cref="WordPart"/> segments preserving quoting context.
     /// </summary>
-    public List<string> Words { get; init; } = [];
+    public List<List<WordPart>> Words { get; init; } = [];
 
     /// <summary>
     /// I/O redirections attached to this command.

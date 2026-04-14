@@ -8,8 +8,11 @@ public enum TokenType
     /// <summary>A word or identifier (command name, argument, etc.).</summary>
     Word,
 
-    /// <summary>A string literal (single or double quoted).</summary>
-    String,
+    /// <summary>A double-quoted string literal. Allows variable/command expansion.</summary>
+    DoubleQuotedString,
+
+    /// <summary>A single-quoted string literal. Everything is literal (no expansion).</summary>
+    SingleQuotedString,
 
     /// <summary>An assignment word (contains '=' before any space, e.g. VAR=value).</summary>
     AssignmentWord,

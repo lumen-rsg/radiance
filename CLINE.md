@@ -40,7 +40,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | 1 | Foundation | ✅ Complete | REPL loop + basic command execution + builtins |
 | 2 | Lexer & Parser | ✅ Complete | Proper tokenizer, AST, quoting |
 | 3 | Pipelines & Redirections | ✅ Complete | Pipes (`\|`), file redirects (`>`, `<`, `>>`) |
-| 4 | Variables & Expansion | ⬜ Not Started | `$VAR`, `$(cmd)`, tilde, brace, glob |
+| 4 | Variables & Expansion | ✅ Complete | `$VAR`, `$(cmd)`, `$((expr))`, tilde, glob |
 | 5 | Control Flow | ⬜ Not Started | `if`, `for`, `while`, `case` |
 | 6 | Advanced Features | ⬜ Not Started | Functions, aliases, job control, history, completion |
 | 7 | Script Execution & Polish | ⬜ Not Started | `.sh` files, `source`, config, colorized output |
@@ -86,6 +86,42 @@ Radiance/
 ```
 
 ## Changelog
+
+### [0.4.0] — Phase 4: Variables & Expansion ✅
+
+**Added:**
+- New `src/Expansion/` module with full BASH-compatible expansion pipeline:
+  - `Expander.cs` — orchestrates expansion phases in correct BASH order (tilde → variable → command substitution → arithmetic → glob)
+  - `TildeExpander.cs` — `~` and `~user` expansion to home directories
+  - `VariableExpander.cs` — `$VAR`, `${VAR}`, special variables (`$?`, `$$`, `$!`, `$#`, `$@`, `$*`, `$0`–`$9`), parameter expansion (`${VAR:-default}`, `${VAR:=default}`, `${VAR:+alt}`, `${#VAR}`)
+  - `CommandSubstitution.cs` — `$(command)` and `` `command` `` substitution with recursive expansion
+  - `ArithmeticExpander.cs` — `$((expression))` with full integer arithmetic (comparison, bitwise, logical, shift operators) via recursive-descent expression parser
+  - `GlobExpander.cs` — filename generation with `*`, `?`, `[...]` patterns, hidden dot-file rules, regex conversion
+- New `WordPart` type (`src/Parser/Ast/WordPart.cs`) — tracks quoting context per word segment:
+  - `WordQuoting.None` — all expansions apply
+  - `WordQuoting.Double` — variable/command substitution/arithmetic only
+  - `WordQuoting.Single` — no expansion (literal)
+  - `WordQuoting.Escaped` — literal
+- Updated `SimpleCommandNode.Words` from `List<string>` to `List<List<WordPart>>` for quoting-aware expansion
+- Updated `RedirectNode.Target` from `string` to `List<WordPart>` for expansion in redirect filenames
+- Updated `TokenType` — split `String` into `DoubleQuotedString` and `SingleQuotedString`
+- Updated lexer:
+  - Emits `DoubleQuotedString` and `SingleQuotedString` tokens instead of generic `String`
+  - `$(...)` command substitution tracking with nested parenthesis/quote handling
+  - Backtick `` `...` `` command substitution scanning
+- Updated parser:
+  - Adjacent quoted/unquoted tokens merged into single word (e.g., `hello"world"` → one word with two parts)
+  - `WordPart` lists preserve quoting context for each segment
+- Updated `ShellContext` (`ExecutionCtx.cs`):
+  - Positional parameters (`$1`–`$9`) with `SetPositionalParams`/`GetPositionalParam`
+  - `$#` (count), `$@`/`$*` (all params)
+  - `$0` (shell name), `$!` (last background PID), `$-` (shell options)
+- Updated `ShellInterpreter`:
+  - Uses `Expander` for all word and string expansion instead of inline variable expansion
+  - `ExpandVariables` method delegates to `Expander.ExpandString` for backward compatibility
+- Updated `PipelineExecutor`:
+  - Accepts `Expander` instance for full expansion in pipelines and redirects
+  - Redirect target filenames are expanded through the full expansion pipeline
 
 ### [0.3.0] — Phase 3: Pipelines & Redirections ✅
 

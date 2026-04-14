@@ -1,6 +1,7 @@
 using Radiance.Lexer;
 using Radiance.Parser.Ast;
 
+// ReSharper disable once CheckNamespace
 namespace Radiance.Parser;
 
 /// <summary>
@@ -103,11 +104,13 @@ public sealed class Parser
 
     /// <summary>
     /// Parses a simple command: optional assignments, command words, and redirections.
+    /// Words are stored as <see cref="WordPart"/> lists to preserve quoting context
+    /// for the expansion phase.
     /// </summary>
     private SimpleCommandNode ParseSimpleCommand()
     {
         var assignments = new List<AssignmentNode>();
-        var words = new List<string>();
+        var words = new List<List<WordPart>>();
         var redirects = new List<RedirectNode>();
 
         SkipCommentsAndNewlines();
@@ -122,10 +125,33 @@ public sealed class Parser
             assignments.Add(new AssignmentNode(name, value));
         }
 
-        // Collect command words (Word or String tokens)
-        while (Current().Type is TokenType.Word or TokenType.String)
+        // Collect command words (Word, DoubleQuotedString, or SingleQuotedString tokens)
+        // Adjacent quoted/unquoted segments are merged into a single word (e.g., hello"world")
+        while (IsWordToken())
         {
-            words.Add(Advance().Value);
+            var wordParts = new List<WordPart>();
+
+            // Collect adjacent word-like tokens into a single word
+            while (IsWordToken())
+            {
+                var token = Current();
+                switch (token.Type)
+                {
+                    case TokenType.Word:
+                        wordParts.Add(new WordPart(token.Value, WordQuoting.None));
+                        break;
+                    case TokenType.DoubleQuotedString:
+                        wordParts.Add(new WordPart(token.Value, WordQuoting.Double));
+                        break;
+                    case TokenType.SingleQuotedString:
+                        wordParts.Add(new WordPart(token.Value, WordQuoting.Single));
+                        break;
+                }
+
+                Advance();
+            }
+
+            words.Add(wordParts);
         }
 
         // Collect redirections
@@ -145,6 +171,12 @@ public sealed class Parser
     }
 
     /// <summary>
+    /// Checks if the current token is a word-like token (Word, DoubleQuotedString, or SingleQuotedString).
+    /// </summary>
+    private bool IsWordToken() =>
+        Current().Type is TokenType.Word or TokenType.DoubleQuotedString or TokenType.SingleQuotedString;
+
+    /// <summary>
     /// Parses a single I/O redirection.
     /// </summary>
     private RedirectNode? ParseRedirect()
@@ -152,13 +184,32 @@ public sealed class Parser
         var opToken = Advance();
         var targetToken = Current();
 
-        if (targetToken.Type is not (TokenType.Word or TokenType.String))
+        if (!IsWordToken())
         {
             ReportError($"expected filename after redirection operator '{opToken.Value}', got {targetToken.Type}");
             return null;
         }
 
-        Advance(); // consume the target word
+        // Build word parts for the redirect target (supports quoting)
+        var targetParts = new List<WordPart>();
+        while (IsWordToken())
+        {
+            var token = Current();
+            switch (token.Type)
+            {
+                case TokenType.Word:
+                    targetParts.Add(new WordPart(token.Value, WordQuoting.None));
+                    break;
+                case TokenType.DoubleQuotedString:
+                    targetParts.Add(new WordPart(token.Value, WordQuoting.Double));
+                    break;
+                case TokenType.SingleQuotedString:
+                    targetParts.Add(new WordPart(token.Value, WordQuoting.Single));
+                    break;
+            }
+
+            Advance();
+        }
 
         var fd = opToken.Type switch
         {
@@ -166,7 +217,7 @@ public sealed class Parser
             _ => 1
         };
 
-        return new RedirectNode(opToken.Type, targetToken.Value, fd);
+        return new RedirectNode(opToken.Type, targetParts, fd);
     }
 
     // ──── Helper Methods ────

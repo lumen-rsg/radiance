@@ -203,7 +203,7 @@ public sealed class Lexer
         if (_pos < _source.Length)
             Advance(); // skip closing '
 
-        return new Token(TokenType.String, sb.ToString(), startLine, startCol);
+        return new Token(TokenType.SingleQuotedString, sb.ToString(), startLine, startCol);
     }
 
     /// <summary>
@@ -258,12 +258,12 @@ public sealed class Lexer
         if (_pos < _source.Length)
             Advance(); // skip closing "
 
-        return new Token(TokenType.String, sb.ToString(), startLine, startCol);
+        return new Token(TokenType.DoubleQuotedString, sb.ToString(), startLine, startCol);
     }
 
     /// <summary>
-    /// Reads an unquoted word. Handles backslash escapes and detects
-    /// assignment words (VAR=value pattern).
+    /// Reads an unquoted word. Handles backslash escapes, command substitution
+    /// <c>$(...)</c> and backticks, and detects assignment words (VAR=value pattern).
     /// </summary>
     private Token ReadWord()
     {
@@ -282,6 +282,20 @@ public sealed class Lexer
                 continue;
             }
 
+            // Command substitution: $(...)
+            if (_source[_pos] == '$' && _pos + 1 < _source.Length && _source[_pos + 1] == '(')
+            {
+                ReadCommandSubstitution(sb);
+                continue;
+            }
+
+            // Backtick command substitution: `...`
+            if (_source[_pos] == '`')
+            {
+                ReadBacktickSubstitution(sb);
+                continue;
+            }
+
             sb.Append(_source[_pos]);
             Advance();
         }
@@ -293,6 +307,118 @@ public sealed class Lexer
         var tokenType = IsAssignmentWord(value) ? TokenType.AssignmentWord : TokenType.Word;
 
         return new Token(tokenType, value, startLine, startCol);
+    }
+
+    /// <summary>
+    /// Reads a <c>$(...)</c> command substitution, tracking parenthesis nesting.
+    /// Appends the full substitution (including delimiters) to the StringBuilder.
+    /// </summary>
+    private void ReadCommandSubstitution(StringBuilder sb)
+    {
+        sb.Append(_source[_pos]); // $
+        Advance();
+        sb.Append(_source[_pos]); // (
+        Advance();
+
+        var depth = 1;
+
+        while (_pos < _source.Length && depth > 0)
+        {
+            if (_source[_pos] == '(')
+            {
+                depth++;
+            }
+            else if (_source[_pos] == ')')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    sb.Append(_source[_pos]);
+                    Advance();
+                    break;
+                }
+            }
+            else if (_source[_pos] == '\'' )
+            {
+                // Read single-quoted string inside substitution
+                sb.Append(_source[_pos]);
+                Advance();
+                while (_pos < _source.Length && _source[_pos] != '\'')
+                {
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+
+                if (_pos < _source.Length)
+                {
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+
+                continue;
+            }
+            else if (_source[_pos] == '"')
+            {
+                // Read double-quoted string inside substitution
+                sb.Append(_source[_pos]);
+                Advance();
+                while (_pos < _source.Length && _source[_pos] != '"')
+                {
+                    if (_source[_pos] == '\\' && _pos + 1 < _source.Length)
+                    {
+                        sb.Append(_source[_pos]);
+                        Advance();
+                    }
+
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+
+                if (_pos < _source.Length)
+                {
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+
+                continue;
+            }
+            else if (_source[_pos] == '\\' && _pos + 1 < _source.Length)
+            {
+                sb.Append(_source[_pos]);
+                Advance();
+            }
+
+            sb.Append(_source[_pos]);
+            Advance();
+        }
+    }
+
+    /// <summary>
+    /// Reads a backtick <c>`...`</c> command substitution.
+    /// Appends the full substitution (including backticks) to the StringBuilder.
+    /// </summary>
+    private void ReadBacktickSubstitution(StringBuilder sb)
+    {
+        sb.Append(_source[_pos]); // opening `
+        Advance();
+
+        while (_pos < _source.Length && _source[_pos] != '`')
+        {
+            if (_source[_pos] == '\\' && _pos + 1 < _source.Length)
+            {
+                sb.Append(_source[_pos]);
+                Advance();
+            }
+
+            sb.Append(_source[_pos]);
+            Advance();
+        }
+
+        if (_pos < _source.Length)
+        {
+            sb.Append(_source[_pos]); // closing `
+            Advance();
+        }
     }
 
     /// <summary>

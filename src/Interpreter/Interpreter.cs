@@ -1,6 +1,5 @@
-using System.Text;
 using Radiance.Builtins;
-using Radiance.Lexer;
+using Radiance.Expansion;
 using Radiance.Parser.Ast;
 
 namespace Radiance.Interpreter;
@@ -15,6 +14,7 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     private readonly BuiltinRegistry _builtins;
     private readonly ProcessManager _processManager;
     private readonly PipelineExecutor _pipelineExecutor;
+    private readonly Expander _expander;
 
     /// <summary>
     /// Creates a new interpreter with the given context, builtin registry, and process manager.
@@ -27,8 +27,27 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         _context = context;
         _builtins = builtins;
         _processManager = processManager;
-        _pipelineExecutor = new PipelineExecutor(context, builtins, processManager, this);
+        _expander = new Expander(context, builtins, processManager);
+        _pipelineExecutor = new PipelineExecutor(context, builtins, processManager, this, _expander);
     }
+
+    /// <summary>
+    /// Creates a new interpreter sharing an existing expander (used by command substitution
+    /// to avoid re-creating the expander).
+    /// </summary>
+    internal ShellInterpreter(ShellContext context, BuiltinRegistry builtins, ProcessManager processManager, Expander expander)
+    {
+        _context = context;
+        _builtins = builtins;
+        _processManager = processManager;
+        _expander = expander;
+        _pipelineExecutor = new PipelineExecutor(context, builtins, processManager, this, _expander);
+    }
+
+    /// <summary>
+    /// Gets the expander used by this interpreter.
+    /// </summary>
+    internal Expander Expander => _expander;
 
     /// <summary>
     /// Executes a top-level AST node and returns the exit code.
@@ -57,17 +76,17 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             // Check the separator from the previous pipeline to decide whether to execute
             if (i > 0)
             {
-                var separator = node.Separators.Count >= i ? node.Separators[i - 1] : TokenType.Semicolon;
+                var separator = node.Separators.Count >= i ? node.Separators[i - 1] : Lexer.TokenType.Semicolon;
 
                 switch (separator)
                 {
-                    case TokenType.And when exitCode != 0:
+                    case Lexer.TokenType.And when exitCode != 0:
                         // && but previous failed — skip this pipeline
                         continue;
-                    case TokenType.Or when exitCode == 0:
+                    case Lexer.TokenType.Or when exitCode == 0:
                         // || but previous succeeded — skip this pipeline
                         continue;
-                    case TokenType.Ampersand:
+                    case Lexer.TokenType.Ampersand:
                         // & — background execution (Phase 6)
                         // For now, just execute normally
                         break;
@@ -100,7 +119,7 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// Executes a simple command:
     /// <list type="number">
     /// <item>Process prefix assignments</item>
-    /// <item>Expand variables in command words</item>
+    /// <item>Expand all words using the full expansion pipeline</item>
     /// <item>If there are no words, treat assignments as permanent shell variable assignments</item>
     /// <item>If there are words, dispatch to builtin or external command</item>
     /// </list>
@@ -114,8 +133,6 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         }
 
         // Process prefix assignments
-        // If there's a command, these are temporary for that command only.
-        // If there's no command, these are permanent shell variables.
         var assignments = node.Assignments;
 
         if (node.Words.Count == 0)
@@ -123,21 +140,34 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             // No command — permanent variable assignments
             foreach (var assignment in assignments)
             {
-                var value = ExpandVariables(assignment.Value);
+                var value = _expander.ExpandString(assignment.Value);
                 _context.SetVariable(assignment.Name, value);
             }
 
             return 0;
         }
 
-        // Expand variables in all words
-        var expandedWords = node.Words.Select(ExpandVariables).ToList();
+        // Expand all words using the full expansion pipeline
+        // (tilde, variable, command substitution, arithmetic, glob)
+        var expandedWords = _expander.ExpandWords(node.Words);
 
-        // If there are prefix assignments with a command, they should be temporary.
-        // For Phase 2 simplicity: set them permanently (temporary env for child commands in Phase 4).
+        if (expandedWords.Count == 0)
+        {
+            // All words expanded to nothing — just process assignments
+            foreach (var assignment in assignments)
+            {
+                var value = _expander.ExpandString(assignment.Value);
+                _context.SetVariable(assignment.Name, value);
+            }
+
+            return 0;
+        }
+
+        // If there are prefix assignments with a command, set them.
+        // TODO Phase 5+: Make these temporary for the command only.
         foreach (var assignment in assignments)
         {
-            var value = ExpandVariables(assignment.Value);
+            var value = _expander.ExpandString(assignment.Value);
             _context.SetVariable(assignment.Name, value);
         }
 
@@ -161,84 +191,17 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// </remarks>
     public int VisitAssignment(AssignmentNode node)
     {
-        var value = ExpandVariables(node.Value);
+        var value = _expander.ExpandString(node.Value);
         _context.SetVariable(node.Name, value);
         return 0;
     }
 
-    // ──── Variable Expansion ────
-
     /// <summary>
-    /// Expands $VAR and ${VAR} references in a string.
-    /// Special variables: $? (last exit code), $$ (PID).
+    /// Expands variables in a simple string (legacy method for backward compatibility).
+    /// For full expansion, use the <see cref="Expander"/> directly.
     /// </summary>
-    /// <param name="input">The string potentially containing variable references.</param>
-    /// <returns>The string with all variable references expanded.</returns>
     internal string ExpandVariables(string input)
     {
-        if (!input.Contains('$'))
-            return input;
-
-        var sb = new StringBuilder();
-        var i = 0;
-
-        while (i < input.Length)
-        {
-            if (input[i] == '$' && i + 1 < input.Length)
-            {
-                i++; // skip $
-
-                if (input[i] == '?')
-                {
-                    sb.Append(_context.LastExitCode);
-                    i++;
-                }
-                else if (input[i] == '$')
-                {
-                    sb.Append(Environment.ProcessId);
-                    i++;
-                }
-                else if (input[i] == '{')
-                {
-                    // ${VAR} form
-                    i++; // skip {
-                    var name = new StringBuilder();
-                    while (i < input.Length && input[i] != '}')
-                    {
-                        name.Append(input[i]);
-                        i++;
-                    }
-
-                    if (i < input.Length) i++; // skip }
-                    sb.Append(_context.GetVariable(name.ToString()));
-                }
-                else if (char.IsLetterOrDigit(input[i]) || input[i] == '_')
-                {
-                    // $VAR form
-                    var name = new StringBuilder();
-                    while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_'))
-                    {
-                        name.Append(input[i]);
-                        i++;
-                    }
-
-                    sb.Append(_context.GetVariable(name.ToString()));
-                }
-                else
-                {
-                    // Lone $ or $<special> — keep the $
-                    sb.Append('$');
-                    sb.Append(input[i]);
-                    i++;
-                }
-            }
-            else
-            {
-                sb.Append(input[i]);
-                i++;
-            }
-        }
-
-        return sb.ToString();
+        return _expander.ExpandString(input);
     }
 }
