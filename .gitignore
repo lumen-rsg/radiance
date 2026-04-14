@@ -1,0 +1,27 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.log
+
+## IDE
+.idea/
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+
+## macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+## Build outputs
+*.dll
+*.pdb
+*.exe
+*.deps.json
+*.runtimeconfig.json
