@@ -321,6 +321,16 @@ public sealed class Lexer
                 continue;
             }
 
+            // Special variable $# (positional parameter count) — must be checked
+            // before # is treated as a comment/word-terminator
+            if (_source[_pos] == '$' && _pos + 1 < _source.Length && _source[_pos + 1] == '#')
+            {
+                sb.Append("$#");
+                Advance(); // skip $
+                Advance(); // skip #
+                continue;
+            }
+
             // Backtick command substitution: `...`
             if (_source[_pos] == '`')
             {

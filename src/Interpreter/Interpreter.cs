@@ -343,6 +343,10 @@ public sealed class ShellInterpreter : IAstVisitor<int>
                 break;
             }
 
+            // Check return — propagate to function level
+            if (_context.ReturnRequested)
+                break;
+
             // Check continue — just move to next iteration
             if (_context.ContinueRequested)
             {
@@ -411,6 +415,10 @@ public sealed class ShellInterpreter : IAstVisitor<int>
                 _context.BreakDepth = 1;
                 break;
             }
+
+            // Check return — propagate to function level
+            if (_context.ReturnRequested)
+                break;
 
             // Check continue — skip to next iteration
             if (_context.ContinueRequested)
@@ -556,7 +564,7 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// <param name="name">The function name.</param>
     /// <param name="args">The arguments (including function name as args[0]).</param>
     /// <returns>The exit code of the function body or the <c>return</c> exit code.</returns>
-    private int ExecuteFunction(string name, List<string> args)
+    internal int ExecuteFunction(string name, List<string> args)
     {
         var func = _context.GetFunction(name);
         if (func is null)

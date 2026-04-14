@@ -141,6 +141,34 @@ public sealed class PipelineExecutor
             {
                 exitCode = ExecuteBuiltinWithRedirects(cmd, expandedWords.ToArray(), stdinStream, stdoutStream);
             }
+            else if (_context.HasFunction(commandName))
+            {
+                // Function with redirects — capture output via Console.SetOut
+                var captured = new StringWriter();
+                var originalOut = Console.Out;
+                try
+                {
+                    Console.SetOut(captured);
+                    exitCode = _interpreter.ExecuteFunction(commandName, expandedWords);
+
+                    var output = captured.ToString();
+                    if (stdoutStream is not null)
+                    {
+                        var bytes = System.Text.Encoding.UTF8.GetBytes(output);
+                        stdoutStream.Write(bytes, 0, bytes.Length);
+                        stdoutStream.Flush();
+                    }
+                    else
+                    {
+                        Console.SetOut(originalOut);
+                        Console.Write(output);
+                    }
+                }
+                finally
+                {
+                    Console.SetOut(originalOut);
+                }
+            }
             else
             {
                 exitCode = ExecuteExternalWithRedirects(commandName, expandedWords.ToArray(), stdinStream, stdoutStream);
@@ -269,6 +297,38 @@ public sealed class PipelineExecutor
                     {
                         Console.SetOut(captured);
                         _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out lastExitCode);
+                    }
+                    finally
+                    {
+                        Console.SetOut(origOut);
+                    }
+
+                    var output = captured.ToString();
+                    if (stdoutFile is not null)
+                    {
+                        var bytes = System.Text.Encoding.UTF8.GetBytes(output);
+                        stdoutFile.Write(bytes, 0, bytes.Length);
+                        pipeData = null;
+                    }
+                    else if (isLast)
+                    {
+                        Console.Write(output);
+                        pipeData = null;
+                    }
+                    else
+                    {
+                        pipeData = System.Text.Encoding.UTF8.GetBytes(output);
+                    }
+                }
+                else if (_context.HasFunction(commandName))
+                {
+                    // Function — capture output via Console.SetOut (same pattern as builtin)
+                    var captured = new StringWriter();
+                    var origOut = Console.Out;
+                    try
+                    {
+                        Console.SetOut(captured);
+                        lastExitCode = _interpreter.ExecuteFunction(commandName, expandedWords);
                     }
                     finally
                     {
