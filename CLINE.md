@@ -41,7 +41,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | 2 | Lexer & Parser | ✅ Complete | Proper tokenizer, AST, quoting |
 | 3 | Pipelines & Redirections | ✅ Complete | Pipes (`\|`), file redirects (`>`, `<`, `>>`) |
 | 4 | Variables & Expansion | ✅ Complete | `$VAR`, `$(cmd)`, `$((expr))`, tilde, glob |
-| 5 | Control Flow | ⬜ Not Started | `if`, `for`, `while`, `case` |
+| 5 | Control Flow | ✅ Complete | `if`, `for`, `while`, `case` |
 | 6 | Advanced Features | ⬜ Not Started | Functions, aliases, job control, history, completion |
 | 7 | Script Execution & Polish | ⬜ Not Started | `.sh` files, `source`, config, colorized output |
 | 8 | Testing & Hardening | ⬜ Not Started | Unit/integration tests, POSIX compliance |
@@ -86,6 +86,54 @@ Radiance/
 ```
 
 ## Changelog
+
+### [0.5.0] — Phase 5: Control Flow ✅
+
+**Added:**
+- New AST node types for compound commands:
+  - `IfNode` (`src/Parser/Ast/IfNode.cs`) — `if/elif/else/fi` with condition, then-body, elif branches, else-body
+  - `ForNode` (`src/Parser/Ast/ForNode.cs`) — `for VAR in words; do body; done` with variable name, iterable words, body
+  - `WhileNode` (`src/Parser/Ast/WhileNode.cs`) — `while/until condition; do body; done` with `IsUntil` flag
+  - `CaseNode` + `CaseItem` (`src/Parser/Ast/CaseNode.cs`) — `case WORD in pattern) body ;; esac` with glob-pattern matching
+- Updated `IAstVisitor<T>` with 4 new visit methods: `VisitIf`, `VisitFor`, `VisitWhile`, `VisitCase`
+- Updated `PipelineNode.Commands` from `List<SimpleCommandNode>` to `List<AstNode>` — compound commands can appear in pipelines
+- New `TokenType.DoubleSemicolon` (`;;`) for case statement item separators
+- Updated lexer to produce `DoubleSemicolon` tokens
+- Major parser rewrite (`src/Parser/Parser.cs`):
+  - `ParseCommand()` dispatches to compound command parsers based on keyword
+  - `ParseIf()` — full `if/then/elif/then/else/fi` with nested condition/body parsing
+  - `ParseFor()` — `for VAR in words; do body; done` with optional `in` clause
+  - `ParseWhile()` — `while/until condition; do body; done`
+  - `ParseCase()` — `case WORD in pattern(|pattern)...) body ;; esac` with multi-pattern items
+  - `ParseCompoundList()` — terminates at specified keywords (then/fi/do/done/esac/;;)
+  - Keyword detection via `IsKeyword()` helper — keywords are `Word` tokens detected contextually in the parser
+  - `ParseSimpleCommand()` stops word collection at terminator keywords (then/fi/do/done/etc.)
+- Updated `ShellInterpreter` (`src/Interpreter/Interpreter.cs`):
+  - `VisitIf` — evaluate condition, execute matching branch (then/elif/else)
+  - `VisitFor` — expand iterable words (with glob), loop setting variable + executing body
+  - `VisitWhile` — `while` loops while exit code 0; `until` loops while exit code non-zero; safety limit of 1M iterations
+  - `VisitCase` — expand word, match against patterns using glob-style regex matching, execute first matching body
+  - `MatchCasePattern()` / `GlobToRegex()` — glob-to-regex conversion for case pattern matching
+- Updated `PipelineExecutor` (`src/Interpreter/PipelineExecutor.cs`):
+  - Handles `AstNode` entries in pipelines (not just `SimpleCommandNode`)
+  - Compound commands in pipelines: captures Console.Out output and writes to pipe
+- Updated `RadianceShell` (`src/Shell/RadianceShell.cs`):
+  - Multi-line input support via block stack tracking
+  - Unclosed `if/for/while/until/case` triggers PS2 continuation prompt (`> `)
+  - `ComputeBlockStack()` — lexes each line, counts block openers/closers in command position
+  - `IsInCommandPosition()` — determines if a token is a keyword in command position
+  - Reads continuation lines until all blocks are closed
+
+**Grammar additions:**
+```
+command      := simple_command | compound_command
+compound_command := if_command | for_command | while_command | case_command
+if_command   := 'if' list 'then' list ('elif' list 'then' list)* ['else' list] 'fi'
+for_command  := 'for' WORD ['in' word*] separator 'do' list 'done'
+while_command := ('while' | 'until') list 'do' list 'done'
+case_command := 'case' WORD 'in' case_item* 'esac'
+case_item    := pattern ('|' pattern)* ')' list ';;'
+```
 
 ### [0.4.0] — Phase 4: Variables & Expansion ✅
 

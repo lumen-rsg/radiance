@@ -10,6 +10,8 @@ namespace Radiance.Interpreter;
 /// <summary>
 /// Orchestrates the execution of multi-command pipelines and file redirections.
 /// Connects processes via anonymous pipes and handles I/O redirection to files.
+/// Supports compound commands (if, for, while, case) in pipelines by capturing
+/// their console output.
 /// </summary>
 public sealed class PipelineExecutor
 {
@@ -25,7 +27,7 @@ public sealed class PipelineExecutor
     /// <param name="context">The shell execution context.</param>
     /// <param name="builtins">The builtin command registry.</param>
     /// <param name="processManager">The external process manager.</param>
-    /// <param name="interpreter">The shell interpreter (for executing builtins).</param>
+    /// <param name="interpreter">The shell interpreter (for executing builtins and compound commands).</param>
     /// <param name="expander">The expansion engine (for word expansion).</param>
     public PipelineExecutor(
         ShellContext context,
@@ -65,8 +67,25 @@ public sealed class PipelineExecutor
 
     /// <summary>
     /// Executes a single command with its file redirections applied.
+    /// Handles both simple commands and compound commands.
     /// </summary>
-    private int ExecuteSingleWithRedirects(SimpleCommandNode cmd)
+    private int ExecuteSingleWithRedirects(AstNode cmd)
+    {
+        if (cmd is SimpleCommandNode simpleCmd)
+        {
+            return ExecuteSingleSimpleWithRedirects(simpleCmd);
+        }
+
+        // Compound command (if, for, while, case) with redirects
+        // For now, execute normally — redirect support for compound commands
+        // can be enhanced later
+        return _interpreter.Execute(cmd);
+    }
+
+    /// <summary>
+    /// Executes a single simple command with its file redirections applied.
+    /// </summary>
+    private int ExecuteSingleSimpleWithRedirects(SimpleCommandNode cmd)
     {
         // Resolve redirects (expand redirect target paths)
         var stdinFile = GetStdinRedirect(cmd);
@@ -153,8 +172,9 @@ public sealed class PipelineExecutor
 
     /// <summary>
     /// Executes a multi-command pipeline using anonymous pipes to connect processes.
+    /// Supports simple commands, compound commands, and builtins.
     /// </summary>
-    private int ExecutePipeline(List<SimpleCommandNode> commands)
+    private int ExecutePipeline(List<AstNode> commands)
     {
         var processCount = commands.Count;
         var processes = new Process?[processCount];
@@ -172,30 +192,24 @@ public sealed class PipelineExecutor
                 pipePairs[i] = (writer, reader);
             }
 
-            // 2. Start all processes / execute builtins
+            // 2. Start all processes / execute builtins / execute compound commands
             for (var i = 0; i < processCount; i++)
             {
                 var cmd = commands[i];
-                var expandedWords = ExpandWords(cmd);
-
-                if (expandedWords.Count == 0)
-                {
-                    builtinResults[i] = (true, 0, null);
-                    continue;
-                }
-
-                var commandName = expandedWords[0];
 
                 // Determine stdin stream for this command
                 Stream? stdinStream = null;
                 if (i == 0)
                 {
-                    // First command: check for file redirect
-                    var stdinFile = GetStdinRedirect(cmd);
-                    if (stdinFile is not null)
+                    // First command: check for file redirect (only for simple commands)
+                    if (cmd is SimpleCommandNode simpleCmd0)
                     {
-                        stdinStream = new FileStream(stdinFile, FileMode.Open, FileAccess.Read, FileShare.Read);
-                        redirectFiles.Add(stdinStream);
+                        var stdinFile = GetStdinRedirect(simpleCmd0);
+                        if (stdinFile is not null)
+                        {
+                            stdinStream = new FileStream(stdinFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+                            redirectFiles.Add(stdinStream);
+                        }
                     }
                 }
                 else
@@ -208,17 +222,20 @@ public sealed class PipelineExecutor
                 Stream? stdoutStream = null;
                 if (i == processCount - 1)
                 {
-                    // Last command: check for file redirect
-                    var stdoutRedirect = GetStdoutRedirect(cmd);
-                    if (stdoutRedirect is not null)
+                    // Last command: check for file redirect (only for simple commands)
+                    if (cmd is SimpleCommandNode simpleCmdN)
                     {
-                        var (file, append) = stdoutRedirect.Value;
-                        stdoutStream = new FileStream(
-                            file,
-                            append ? FileMode.Append : FileMode.Create,
-                            FileAccess.Write,
-                            FileShare.None);
-                        redirectFiles.Add(stdoutStream);
+                        var stdoutRedirect = GetStdoutRedirect(simpleCmdN);
+                        if (stdoutRedirect is not null)
+                        {
+                            var (file, append) = stdoutRedirect.Value;
+                            stdoutStream = new FileStream(
+                                file,
+                                append ? FileMode.Append : FileMode.Create,
+                                FileAccess.Write,
+                                FileShare.None);
+                            redirectFiles.Add(stdoutStream);
+                        }
                     }
                 }
                 else
@@ -226,6 +243,51 @@ public sealed class PipelineExecutor
                     // Write to the next pipe
                     stdoutStream = pipePairs[i]!.Value.writer;
                 }
+
+                // Handle compound commands (if, for, while, case) — capture output like builtins
+                if (cmd is not SimpleCommandNode)
+                {
+                    var capturedOutput = new StringWriter();
+                    var originalOut = Console.Out;
+                    try
+                    {
+                        Console.SetOut(capturedOutput);
+                        var exitCode = _interpreter.Execute(cmd);
+                        builtinResults[i] = (true, exitCode, capturedOutput.ToString());
+                    }
+                    finally
+                    {
+                        Console.SetOut(originalOut);
+                    }
+
+                    // Write captured output to the stdout stream (pipe or file)
+                    if (stdoutStream is not null && builtinResults[i].capturedOutput is not null)
+                    {
+                        var bytes = System.Text.Encoding.UTF8.GetBytes(builtinResults[i].capturedOutput!);
+                        stdoutStream.Write(bytes, 0, bytes.Length);
+                        stdoutStream.Flush();
+                    }
+
+                    // Close stdin if it came from a pipe
+                    if (i > 0) stdinStream?.Close();
+                    // Close stdout writer so next process gets EOF
+                    if (i < processCount - 1 && stdoutStream is not null) stdoutStream.Close();
+                    else if (stdoutStream is not null) stdoutStream.Flush();
+
+                    continue;
+                }
+
+                // Simple command path
+                var simpleCommand = (SimpleCommandNode)cmd;
+                var expandedWords = ExpandWords(simpleCommand);
+
+                if (expandedWords.Count == 0)
+                {
+                    builtinResults[i] = (true, 0, null);
+                    continue;
+                }
+
+                var commandName = expandedWords[0];
 
                 // Execute as builtin or external process
                 if (_builtins.IsBuiltin(commandName))
@@ -236,9 +298,6 @@ public sealed class PipelineExecutor
                     try
                     {
                         Console.SetOut(capturedOutput);
-
-                        // Handle stdin for builtin — read all available data
-                        // (builtins don't typically read stdin, but support it)
                         _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out var exitCode);
                         builtinResults[i] = (true, exitCode, capturedOutput.ToString());
                     }
@@ -255,21 +314,9 @@ public sealed class PipelineExecutor
                         stdoutStream.Flush();
                     }
 
-                    // Close stdin if it came from a pipe (signals previous writer)
-                    if (i > 0)
-                    {
-                        stdinStream?.Close();
-                    }
-
-                    // Close stdout writer so next process gets EOF
-                    if (i < processCount - 1 && stdoutStream is not null)
-                    {
-                        stdoutStream.Close();
-                    }
-                    else if (stdoutStream is not null)
-                    {
-                        stdoutStream.Flush();
-                    }
+                    if (i > 0) stdinStream?.Close();
+                    if (i < processCount - 1 && stdoutStream is not null) stdoutStream.Close();
+                    else if (stdoutStream is not null) stdoutStream.Flush();
                 }
                 else
                 {
@@ -291,30 +338,14 @@ public sealed class PipelineExecutor
                         processes[i] = process;
                     }
 
-                    // Close our copy of the pipe handles so the child processes
-                    // can see EOF when they close their end
-                    if (i > 0)
-                    {
-                        // Close the reader we passed to this process
-                        stdinStream?.Close();
-                    }
-
-                    if (i < processCount - 1)
-                    {
-                        // Close the writer we passed to this process
-                        stdoutStream?.Close();
-                    }
-                    else if (stdoutStream is not null)
-                    {
-                        // For last command with file redirect, close our copy
-                        stdoutStream.Close();
-                    }
+                    // Close our copy of the pipe handles
+                    if (i > 0) stdinStream?.Close();
+                    if (i < processCount - 1) stdoutStream?.Close();
+                    else if (stdoutStream is not null) stdoutStream.Close();
                 }
             }
 
             // 3. Wait for all external processes to complete (in reverse order)
-            // Waiting in reverse order helps prevent deadlocks — downstream processes
-            // consume data while upstream ones are still running.
             for (var i = processCount - 1; i >= 0; i--)
             {
                 processes[i]?.WaitForExit();

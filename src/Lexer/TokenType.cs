@@ -44,6 +44,9 @@ public enum TokenType
     /// <summary>Semicolon: ;</summary>
     Semicolon,
 
+    /// <summary>Double semicolon: ;; (used in case statements)</summary>
+    DoubleSemicolon,
+
     /// <summary>Newline.</summary>
     Newline,
 

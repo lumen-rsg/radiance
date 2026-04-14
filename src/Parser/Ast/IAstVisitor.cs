@@ -18,4 +18,16 @@ public interface IAstVisitor<T>
 
     /// <summary>Visits an assignment node.</summary>
     T VisitAssignment(AssignmentNode node);
+
+    /// <summary>Visits an if/elif/else conditional node.</summary>
+    T VisitIf(IfNode node);
+
+    /// <summary>Visits a for loop node.</summary>
+    T VisitFor(ForNode node);
+
+    /// <summary>Visits a while/until loop node.</summary>
+    T VisitWhile(WhileNode node);
+
+    /// <summary>Visits a case statement node.</summary>
+    T VisitCase(CaseNode node);
 }

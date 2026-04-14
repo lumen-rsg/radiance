@@ -9,6 +9,7 @@ namespace Radiance.Shell;
 /// <summary>
 /// The main interactive shell (REPL loop). Reads input, tokenizes with the lexer,
 /// parses into an AST, and interprets via the AST-walking interpreter.
+/// Supports multi-line input for control flow constructs (if/for/while/case).
 /// </summary>
 public sealed class RadianceShell
 {
@@ -18,6 +19,26 @@ public sealed class RadianceShell
     private readonly ShellInterpreter _interpreter;
     private readonly History _history;
     private bool _running = true;
+
+    /// <summary>
+    /// Block-opening keywords that require a matching closer.
+    /// </summary>
+    private static readonly HashSet<string> BlockOpeners = new(StringComparer.Ordinal)
+    {
+        "if", "for", "while", "until", "case"
+    };
+
+    /// <summary>
+    /// Maps each block opener to its corresponding closer keyword.
+    /// </summary>
+    private static readonly Dictionary<string, string> BlockClosers = new(StringComparer.Ordinal)
+    {
+        ["if"] = "fi",
+        ["for"] = "done",
+        ["while"] = "done",
+        ["until"] = "done",
+        ["case"] = "esac"
+    };
 
     public RadianceShell()
     {
@@ -49,8 +70,8 @@ public sealed class RadianceShell
             var prompt = Prompt.Render(_context);
             Console.Write(prompt);
 
-            // Read input
-            var input = ReadLine();
+            // Read input (possibly multi-line)
+            var input = ReadMultiLineInput(prompt);
 
             if (input is null)
             {
@@ -62,13 +83,132 @@ public sealed class RadianceShell
             if (string.IsNullOrWhiteSpace(input))
                 continue;
 
-            _history.Add(input);
+            _history.Add(input.TrimEnd('\n'));
 
             // Execute the input through the Lexer → Parser → Interpreter pipeline
             ExecuteInput(input);
         }
 
         return _context.LastExitCode;
+    }
+
+    /// <summary>
+    /// Reads input, continuing with a PS2 prompt ("> ") if block constructs are unclosed.
+    /// </summary>
+    /// <param name="ps1">The primary prompt string (for calculating left offset).</param>
+    /// <returns>The full input string, possibly spanning multiple lines. Null on EOF.</returns>
+    private string? ReadMultiLineInput(string ps1)
+    {
+        var sb = new StringBuilder();
+        var firstLine = ReadLine();
+
+        if (firstLine is null)
+            return null;
+
+        sb.Append(firstLine);
+
+        // Check if we need more input (unclosed blocks)
+        var blockStack = ComputeBlockStack(firstLine);
+
+        while (blockStack.Count > 0)
+        {
+            // PS2 prompt — continuation
+            Console.Write("> ");
+            var continuation = ReadLine();
+
+            if (continuation is null)
+            {
+                // EOF during continuation
+                Console.WriteLine();
+                break;
+            }
+
+            sb.Append('\n');
+            sb.Append(continuation);
+
+            // Update block stack with the new line
+            var newStack = ComputeBlockStack(continuation, blockStack);
+            blockStack = newStack;
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Computes the block stack depth after parsing a line for keywords.
+    /// Uses the lexer to tokenize and counts block openers/closers.
+    /// </summary>
+    /// <param name="line">The line to analyze.</param>
+    /// <param name="existingStack">Optional existing block stack to build upon.</param>
+    /// <returns>The updated block stack (empty if all blocks are closed).</returns>
+    private Stack<string> ComputeBlockStack(string line, Stack<string>? existingStack = null)
+    {
+        var stack = existingStack ?? new Stack<string>();
+
+        try
+        {
+            var lexer = new Lexer.Lexer(line);
+            var tokens = lexer.Tokenize();
+
+            var i = 0;
+            while (i < tokens.Count)
+            {
+                var token = tokens[i];
+
+                if (token.Type == TokenType.Eof)
+                    break;
+
+                // Only consider keywords in command position (first word in a pipeline,
+                // or after separators like ;, |, &&, ||, newline)
+                if (token.Type == TokenType.Word && IsInCommandPosition(tokens, i))
+                {
+                    if (BlockOpeners.Contains(token.Value))
+                    {
+                        stack.Push(token.Value);
+                    }
+                    else if (stack.Count > 0)
+                    {
+                        var currentBlock = stack.Peek();
+                        if (BlockClosers.TryGetValue(currentBlock, out var closer) && token.Value == closer)
+                        {
+                            stack.Pop();
+                        }
+                    }
+                }
+
+                i++;
+            }
+        }
+        catch
+        {
+            // If lexing fails (e.g., unterminated quote), don't change the stack
+        }
+
+        return stack;
+    }
+
+    /// <summary>
+    /// Determines if a token at the given index is in "command position" — i.e.,
+    /// it could be a keyword that starts or ends a block.
+    /// A token is in command position if it's the first non-separator token,
+    /// or follows a separator (;, newline, |, &&, ||).
+    /// </summary>
+    private static bool IsInCommandPosition(List<Token> tokens, int index)
+    {
+        // Look backwards for the previous meaningful token
+        var prev = index - 1;
+        while (prev >= 0 && tokens[prev].Type is TokenType.Comment)
+            prev--;
+
+        if (prev < 0)
+            return true; // First token — command position
+
+        var prevType = tokens[prev].Type;
+        return prevType is TokenType.Semicolon or TokenType.Newline
+            or TokenType.Pipe or TokenType.And or TokenType.Or
+            or TokenType.DoubleSemicolon
+            // After opening keywords (if, then, elif, else, do)
+            or TokenType.LParen;
     }
 
     /// <summary>
@@ -207,7 +347,7 @@ public sealed class RadianceShell
         // Set shell variables
         context.SetVariable("PWD", context.CurrentDirectory);
         context.SetVariable("SHELL", "radiance");
-        context.SetVariable("RADIANCE_VERSION", "0.3.0");
+        context.SetVariable("RADIANCE_VERSION", "0.5.0");
 
         // Export key variables
         context.ExportVariable("PATH");
@@ -224,7 +364,7 @@ public sealed class RadianceShell
     /// </summary>
     private static void PrintWelcome()
     {
-        var version = "0.3.0";
+        var version = "0.5.0";
         Console.WriteLine();
         Console.WriteLine($"\x1b[1;36m  ╭─────────────────────────────────╮\x1b[0m");
         Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{version} ✦\x1b[1;36m      │\x1b[0m");

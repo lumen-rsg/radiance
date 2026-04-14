@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Radiance.Builtins;
 using Radiance.Expansion;
 using Radiance.Parser.Ast;
@@ -7,6 +8,7 @@ namespace Radiance.Interpreter;
 /// <summary>
 /// AST walker that interprets and executes the parsed AST.
 /// Implements the visitor pattern to dispatch over node types.
+/// Supports control flow: if/elif/else, for, while/until, case.
 /// </summary>
 public sealed class ShellInterpreter : IAstVisitor<int>
 {
@@ -48,6 +50,11 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// Gets the expander used by this interpreter.
     /// </summary>
     internal Expander Expander => _expander;
+
+    /// <summary>
+    /// Gets the shell context.
+    /// </summary>
+    internal ShellContext Context => _context;
 
     /// <summary>
     /// Executes a top-level AST node and returns the exit code.
@@ -194,6 +201,232 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         var value = _expander.ExpandString(node.Value);
         _context.SetVariable(node.Name, value);
         return 0;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Executes an if/elif/else construct:
+    /// <list type="number">
+    /// <item>Evaluate the condition (a command list; exit code 0 = true)</item>
+    /// <item>If condition succeeds, execute the then-body</item>
+    /// <item>Otherwise, try elif branches in order</item>
+    /// <item>If no branch matches, execute the else-body (if present)</item>
+    /// </list>
+    /// </remarks>
+    public int VisitIf(IfNode node)
+    {
+        // Evaluate the primary condition
+        var exitCode = node.Condition.Accept(this);
+
+        if (exitCode == 0)
+        {
+            // Condition true — execute then-body
+            return node.ThenBody.Accept(this);
+        }
+
+        // Try elif branches
+        foreach (var (condition, body) in node.ElifBranches)
+        {
+            exitCode = condition.Accept(this);
+            if (exitCode == 0)
+            {
+                return body.Accept(this);
+            }
+        }
+
+        // Execute else-body if present
+        if (node.ElseBody is not null)
+        {
+            return node.ElseBody.Accept(this);
+        }
+
+        // No branch matched — return 0 per POSIX
+        return 0;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Executes a for loop:
+    /// <list type="number">
+    /// <item>Expand all iterable words (including glob expansion)</item>
+    /// <item>If no words specified, iterate over positional parameters ($@)</item>
+    /// <item>For each value, set the loop variable and execute the body</item>
+    /// </list>
+    /// </remarks>
+    public int VisitFor(ForNode node)
+    {
+        // Expand iterable words
+        List<string> items;
+
+        if (node.IterableWords.Count == 0)
+        {
+            // No 'in' clause — iterate over positional parameters
+            items = _context.PositionalParams.ToList();
+        }
+        else
+        {
+            items = _expander.ExpandWords(node.IterableWords);
+        }
+
+        var exitCode = 0;
+
+        foreach (var item in items)
+        {
+            _context.SetVariable(node.VariableName, item);
+            exitCode = node.Body.Accept(this);
+        }
+
+        return exitCode;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Executes a while or until loop:
+    /// <list type="number">
+    /// <item>Evaluate the condition (a command list)</item>
+    /// <item>For <c>while</c>: loop while exit code is 0</item>
+    /// <item>For <c>until</c>: loop while exit code is non-zero</item>
+    /// <item>Execute the body each iteration</item>
+    /// </list>
+    /// Includes a safety limit to prevent infinite loops during development.
+    /// </remarks>
+    public int VisitWhile(WhileNode node)
+    {
+        var exitCode = 0;
+        const int maxIterations = 1_000_000;
+        var iterations = 0;
+
+        while (true)
+        {
+            var conditionExitCode = node.Condition.Accept(this);
+
+            var shouldContinue = node.IsUntil
+                ? conditionExitCode != 0  // until: loop while condition fails
+                : conditionExitCode == 0; // while: loop while condition succeeds
+
+            if (!shouldContinue)
+                break;
+
+            exitCode = node.Body.Accept(this);
+            iterations++;
+
+            if (iterations >= maxIterations)
+            {
+                Console.Error.WriteLine($"radiance: warning: loop exceeded {maxIterations} iterations, breaking");
+                break;
+            }
+        }
+
+        return exitCode;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Executes a case statement:
+    /// <list type="number">
+    /// <item>Expand the word to match</item>
+    /// <item>For each case item, expand its patterns and try to match</item>
+    /// <item>Use glob-style pattern matching (via <see cref="GlobExpander"/> logic)</item>
+    /// <item>Execute the body of the first matching case item</item>
+    /// <item>If <c>;;</c> is used, stop after the first match (standard BASH behavior)</item>
+    /// </list>
+    /// </remarks>
+    public int VisitCase(CaseNode node)
+    {
+        // Expand the word to match
+        var word = string.Concat(node.Word.Select(p => _expander.ExpandWord(new List<WordPart> { p })));
+        // Actually, expand the whole word as a single unit
+        var expandedWord = _expander.ExpandWord(node.Word);
+        var wordToMatch = expandedWord.Count > 0 ? expandedWord[0] : string.Empty;
+
+        foreach (var item in node.Items)
+        {
+            // Check each pattern in the case item
+            foreach (var patternParts in item.Patterns)
+            {
+                var expandedPattern = _expander.ExpandWord(patternParts);
+                if (expandedPattern.Count == 0)
+                    continue;
+
+                var pattern = expandedPattern[0];
+
+                if (MatchCasePattern(wordToMatch, pattern))
+                {
+                    // Pattern matched — execute the body
+                    return item.Body.Accept(this);
+                }
+            }
+        }
+
+        // No pattern matched — return 0
+        return 0;
+    }
+
+    /// <summary>
+    /// Matches a string against a case pattern using glob-style matching.
+    /// Supports *, ?, and [...] character classes.
+    /// </summary>
+    /// <param name="value">The string to test.</param>
+    /// <param name="pattern">The glob pattern.</param>
+    /// <returns>True if the value matches the pattern.</returns>
+    private static bool MatchCasePattern(string value, string pattern)
+    {
+        // Exact match (fast path)
+        if (pattern == value)
+            return true;
+
+        // * matches everything
+        if (pattern == "*")
+            return true;
+
+        // Convert glob pattern to regex
+        var regex = GlobToRegex(pattern);
+        return Regex.IsMatch(value, $"^{regex}$", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// Converts a glob pattern to a regex pattern string.
+    /// Reuses the same logic as <see cref="GlobExpander"/> but for case matching.
+    /// </summary>
+    private static string GlobToRegex(string pattern)
+    {
+        var result = new System.Text.StringBuilder();
+        foreach (var c in pattern)
+        {
+            switch (c)
+            {
+                case '*':
+                    result.Append(".*");
+                    break;
+                case '?':
+                    result.Append('.');
+                    break;
+                case '.':
+                case '^':
+                case '$':
+                case '+':
+                case '(':
+                case ')':
+                case '{':
+                case '}':
+                case '\\':
+                case '|':
+                    result.Append('\\');
+                    result.Append(c);
+                    break;
+                case '[':
+                    result.Append('[');
+                    break;
+                case ']':
+                    result.Append(']');
+                    break;
+                default:
+                    result.Append(c);
+                    break;
+            }
+        }
+
+        return result.ToString();
     }
 
     /// <summary>

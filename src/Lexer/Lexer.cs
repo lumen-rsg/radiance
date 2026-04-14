@@ -127,9 +127,18 @@ public sealed class Lexer
 
         if (c == ';')
         {
-            var token = MakeToken(TokenType.Semicolon, ";");
-            Advance();
-            return token;
+            if (Peek(1) == ';')
+            {
+                var token = MakeToken(TokenType.DoubleSemicolon, ";;");
+                Advance(); Advance();
+                return token;
+            }
+
+            {
+                var token = MakeToken(TokenType.Semicolon, ";");
+                Advance();
+                return token;
+            }
         }
 
         if (c == '>')
