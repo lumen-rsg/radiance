@@ -83,6 +83,26 @@ public sealed class History
     }
 
     /// <summary>
+    /// Searches history entries that contain the given query string.
+    /// Returns matches in reverse chronological order (newest first).
+    /// </summary>
+    /// <param name="query">The search query.</param>
+    /// <returns>Matching history entries, newest first.</returns>
+    public IEnumerable<string> SearchEntries(string query)
+    {
+        if (string.IsNullOrEmpty(query))
+            return Enumerable.Empty<string>();
+
+        var results = new List<string>();
+        for (var i = _entries.Count - 1; i >= 0; i--)
+        {
+            if (_entries[i].Contains(query, StringComparison.Ordinal))
+                results.Add(_entries[i]);
+        }
+        return results;
+    }
+
+    /// <summary>
     /// Returns all history entries in order.
     /// </summary>
     public IEnumerable<string> GetAll() => _entries;

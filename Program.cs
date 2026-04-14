@@ -19,7 +19,7 @@ namespace Radiance;
 /// </remarks>
 public static class Program
 {
-    private const string Version = "0.7.0";
+    private const string Version = "0.7.5";
 
     public static int Main(string[] args)
     {

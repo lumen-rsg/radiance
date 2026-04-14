@@ -13,7 +13,9 @@ public sealed class ProcessManager
 {
     /// <summary>
     /// Executes an external command by name with the given arguments.
-    /// This is the simple path — no pipe connections, just direct I/O.
+    /// Automatically detects whether Console.Out has been redirected (e.g., during
+    /// command substitution) and uses piped mode to capture output. Otherwise,
+    /// the process inherits the terminal directly for TTY support (btop, vim, etc.).
     /// </summary>
     /// <param name="commandName">The command name or path.</param>
     /// <param name="args">The arguments to pass.</param>
@@ -27,15 +29,30 @@ public sealed class ProcessManager
 
         try
         {
-            var startInfo = BuildStartInfo(resolved, args, context);
-            using var process = new Process { StartInfo = startInfo };
-            WireOutput(process);
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            process.StandardInput.Close();
-            process.WaitForExit();
-            return process.ExitCode;
+            // When Console.Out has been redirected (e.g., command substitution
+            // via Console.SetOut), we need piped mode so external command output
+            // gets captured. Otherwise, let the child inherit the terminal directly
+            // for full TTY support (interactive apps like btop, vim, htop).
+            if (Console.IsOutputRedirected)
+            {
+                var startInfo = BuildCapturedStartInfo(resolved, args, context);
+                using var process = new Process { StartInfo = startInfo };
+                WireOutput(process);
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                process.StandardInput.Close();
+                process.WaitForExit();
+                return process.ExitCode;
+            }
+            else
+            {
+                var startInfo = BuildTerminalStartInfo(resolved, args, context);
+                using var process = new Process { StartInfo = startInfo };
+                process.Start();
+                process.WaitForExit();
+                return process.ExitCode;
+            }
         }
         catch (Exception ex)
         {
@@ -189,9 +206,42 @@ public sealed class ProcessManager
     }
 
     /// <summary>
-    /// Builds a <see cref="ProcessStartInfo"/> for simple (non-piped) execution.
+    /// Builds a <see cref="ProcessStartInfo"/> for terminal-inherited execution.
+    /// No streams are redirected, so the child process gets direct terminal (TTY) access.
+    /// This is essential for interactive applications like btop, vim, htop, etc.
     /// </summary>
-    private static ProcessStartInfo BuildStartInfo(string executablePath, string[] args, ShellContext context)
+    private static ProcessStartInfo BuildTerminalStartInfo(string executablePath, string[] args, ShellContext context)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            WorkingDirectory = context.CurrentDirectory,
+            UseShellExecute = false,
+            // Do NOT redirect any streams — child inherits the terminal directly
+            RedirectStandardOutput = false,
+            RedirectStandardError = false,
+            RedirectStandardInput = false,
+        };
+
+        for (var i = 1; i < args.Length; i++)
+        {
+            startInfo.ArgumentList.Add(args[i]);
+        }
+
+        foreach (var name in context.ExportedVariableNames)
+        {
+            var value = context.GetVariable(name);
+            startInfo.EnvironmentVariables[name] = value;
+        }
+
+        return startInfo;
+    }
+
+    /// <summary>
+    /// Builds a <see cref="ProcessStartInfo"/> for captured-output execution (redirected streams).
+    /// Used when output needs to be captured (e.g., command substitution).
+    /// </summary>
+    private static ProcessStartInfo BuildCapturedStartInfo(string executablePath, string[] args, ShellContext context)
     {
         var startInfo = new ProcessStartInfo
         {

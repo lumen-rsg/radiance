@@ -44,6 +44,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | 5 | Control Flow | ✅ Complete | `if`, `for`, `while`, `case` |
 | 6 | Advanced Features | ✅ Complete | Functions, aliases, job control, history, completion |
 | 7 | Script Execution & Polish | ✅ Complete | `.sh` files, `source`, config, colorized output, bug fixes |
+| 7.5 | QOL & Line Editing | ✅ Complete | Full line editing, Ctrl+R search, improved completion, TTY fix |
 | 8 | Testing & Hardening | ⬜ Not Started | Unit/integration tests, POSIX compliance |
 
 ## Project Structure
@@ -86,6 +87,59 @@ Radiance/
 ```
 
 ## Changelog
+
+### [0.7.5] — Phase 7.5: QOL & Line Editing ✅
+
+**Added:**
+
+**TTY Support for Interactive Commands:**
+- Updated `ProcessManager.Execute()` — simple (non-piped) commands now inherit the terminal directly instead of using redirected streams
+- Auto-detects `Console.IsOutputRedirected` to choose terminal-inherited mode vs. piped mode (for command substitution)
+- New `BuildTerminalStartInfo()` — no stream redirection, child gets raw TTY access
+- Renamed `BuildStartInfo()` → `BuildCapturedStartInfo()` for clarity
+- Fixes: `btop`, `vim`, `htop`, `top`, `nano`, and other interactive TUI apps now work correctly
+
+**Full Line Editing (ReadLine rewrite):**
+- Complete rewrite of `RadianceShell.ReadLine()` with cursor position tracking (`cursorPos`, `startLeft`)
+- `RedisplayLine()` — efficient line redisplay with proper cursor positioning
+- `SetCursorPosition()` — handles line wrapping for long input lines
+- **Navigation shortcuts:**
+  - `←` / `→` — move cursor left/right by character
+  - `Home` / `Ctrl+A` — move to beginning of line
+  - `End` / `Ctrl+E` — move to end of line
+- **Editing shortcuts:**
+  - `Delete` — delete character at cursor
+  - `Ctrl+D` — delete at cursor, or EOF on empty line
+  - `Ctrl+K` — kill from cursor to end of line
+  - `Ctrl+U` — kill from beginning of line to cursor
+  - `Ctrl+W` — delete word backward
+  - `Esc` — clear entire line
+  - `Ctrl+C` — cancel line with `^C` display
+  - `Ctrl+L` — clear screen and re-render prompt + input
+- Insert characters at cursor position (not just append)
+
+**Reverse History Search (Ctrl+R):**
+- `HandleReverseSearch()` — incremental reverse search through history
+- Shows `(reverse-i-search)'query': match` prompt with ANSI colors
+- Type to search, `Ctrl+R` to cycle to older matches, `Enter` to accept, `Esc`/`Ctrl+C` to cancel
+- `Backspace` shrinks query and re-searches
+- Updated `History.SearchEntries()` — searches entries containing query, returns newest first
+
+**Improved Tab Completion:**
+- **Tilde expansion**: `~/` and `~user/` complete correctly by expanding to home directory for search
+- **Variable expansion**: `$HOME/`, `$PWD/` etc. expand for path completion search
+- **Absolute paths**: `/opt/`, `/usr/` etc. now complete correctly
+- **Directory-only mode**: `cd`, `pushd`, `popd`, `rmdir`, `mkdir` only show directory completions
+- **PATH caching**: Executable list cached for 5 seconds (`PathCacheTimeout`) to avoid rescanning PATH on every Tab press
+- **Smart path resolution**: `ExpandPathPrefix()` handles `~`, `~user`, `$VAR`, `/absolute`, and relative paths
+
+**Version bump:** 0.7.0 → 0.7.5
+
+**Modified files:**
+- `src/Interpreter/ProcessManager.cs` — TTY support, terminal-inherited execution
+- `src/Shell/RadianceShell.cs` — full line editing rewrite, Ctrl+R, improved completion
+- `src/Shell/History.cs` — `SearchEntries()` method
+- `Program.cs` — version bump
 
 ### [0.7.0] — Phase 7: Script Execution & Polish ✅
 

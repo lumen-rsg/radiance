@@ -12,11 +12,11 @@ namespace Radiance.Shell;
 /// parses into an AST, and interprets via the AST-walking interpreter.
 /// Supports multi-line input for control flow constructs (if/for/while/case/function).
 /// Handles alias expansion, background jobs, tab completion, script execution,
-/// and persistent history.
+/// persistent history, and full line editing.
 /// </summary>
 public sealed class RadianceShell
 {
-    private const string Version = "0.7.0";
+    private const string Version = "0.7.5";
 
     private readonly ShellContext _context;
     private readonly BuiltinRegistry _builtins;
@@ -24,6 +24,14 @@ public sealed class RadianceShell
     private readonly ShellInterpreter _interpreter;
     private readonly History _history;
     private bool _running = true;
+
+    /// <summary>
+    /// Cached list of PATH executables for tab completion.
+    /// Populated lazily and refreshed when needed.
+    /// </summary>
+    private List<string>? _pathExecutableCache;
+    private DateTime _pathCacheTime = DateTime.MinValue;
+    private static readonly TimeSpan PathCacheTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Block-opening keywords that require a matching closer.
@@ -521,112 +529,440 @@ public sealed class RadianceShell
         return string.Join('\n', lines);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Line Editing
+    // ═══════════════════════════════════════════════════════════════════════
+
     /// <summary>
-    /// Reads a line of input with basic line editing support.
-    /// Supports history navigation (up/down), Ctrl+C, Ctrl+D, and tab completion.
+    /// Reads a line of input with full line editing support.
+    /// Supports cursor movement, history navigation, Ctrl shortcuts,
+    /// tab completion, and reverse history search (Ctrl+R).
     /// </summary>
     private string? ReadLine()
     {
         var sb = new StringBuilder();
-        var left = Console.CursorLeft;
+        var cursorPos = 0;  // Position within the buffer (0 = before first char)
+        var startLeft = Console.CursorLeft;
 
         while (true)
         {
             var key = Console.ReadKey(true);
 
+            // ─── Enter ───
             if (key.Key == ConsoleKey.Enter)
             {
+                // Move cursor to end of line and output newline
+                SetCursorPosition(startLeft, sb, cursorPos, sb.Length);
                 Console.WriteLine();
                 return sb.ToString();
             }
 
+            // ─── Backspace ───
             if (key.Key == ConsoleKey.Backspace)
             {
-                if (sb.Length > 0)
+                if (cursorPos > 0)
                 {
-                    sb.Remove(sb.Length - 1, 1);
-                    Console.Write("\b \b");
+                    sb.Remove(cursorPos - 1, 1);
+                    cursorPos--;
+                    RedisplayLine(startLeft, sb, cursorPos);
                 }
-
                 continue;
             }
 
+            // ─── Delete key ───
+            if (key.Key == ConsoleKey.Delete)
+            {
+                if (cursorPos < sb.Length)
+                {
+                    sb.Remove(cursorPos, 1);
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Left Arrow ───
+            if (key.Key == ConsoleKey.LeftArrow)
+            {
+                if (cursorPos > 0)
+                {
+                    cursorPos--;
+                    SetCursorPosition(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Right Arrow ───
+            if (key.Key == ConsoleKey.RightArrow)
+            {
+                if (cursorPos < sb.Length)
+                {
+                    cursorPos++;
+                    SetCursorPosition(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Up Arrow — History backward ───
             if (key.Key == ConsoleKey.UpArrow)
             {
                 var entry = _history.NavigateUp();
                 if (entry is not null)
                 {
-                    ClearCurrentLine(left, sb.Length);
                     sb.Clear();
                     sb.Append(entry);
-                    Console.SetCursorPosition(left, Console.CursorTop);
-                    Console.Write(entry);
+                    cursorPos = sb.Length;
+                    RedisplayLine(startLeft, sb, cursorPos);
                 }
-
                 continue;
             }
 
+            // ─── Down Arrow — History forward ───
             if (key.Key == ConsoleKey.DownArrow)
             {
                 var entry = _history.NavigateDown();
-                ClearCurrentLine(left, sb.Length);
                 sb.Clear();
                 if (entry is not null)
-                {
                     sb.Append(entry);
-                }
-
-                Console.SetCursorPosition(left, Console.CursorTop);
-                Console.Write(sb.ToString());
+                cursorPos = sb.Length;
+                RedisplayLine(startLeft, sb, cursorPos);
                 continue;
             }
 
+            // ─── Home ───
+            if (key.Key == ConsoleKey.Home)
+            {
+                cursorPos = 0;
+                SetCursorPosition(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── End ───
+            if (key.Key == ConsoleKey.End)
+            {
+                cursorPos = sb.Length;
+                SetCursorPosition(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── Ctrl+C — Cancel line ───
             if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             {
+                // Move to end of line, print ^C and newline
+                SetCursorPosition(startLeft, sb, cursorPos, sb.Length);
                 Console.WriteLine("^C");
                 return string.Empty;
             }
 
+            // ─── Ctrl+D — EOF or delete ───
             if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             {
                 if (sb.Length == 0)
-                    return null;
+                    return null; // EOF
 
-                // If there's text, treat Ctrl+D as delete char (like bash)
+                // If there's text, delete char at cursor (like bash)
+                if (cursorPos < sb.Length)
+                {
+                    sb.Remove(cursorPos, 1);
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
                 continue;
             }
 
+            // ─── Ctrl+A — Move to beginning of line ───
+            if (key.Key == ConsoleKey.A && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                cursorPos = 0;
+                SetCursorPosition(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── Ctrl+E — Move to end of line ───
+            if (key.Key == ConsoleKey.E && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                cursorPos = sb.Length;
+                SetCursorPosition(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── Ctrl+L — Clear screen ───
+            if (key.Key == ConsoleKey.L && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                Console.Clear();
+                var prompt = Prompt.Render(_context);
+                Console.Write(prompt);
+                startLeft = Console.CursorLeft;
+                RedisplayLine(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── Ctrl+K — Kill from cursor to end of line ───
+            if (key.Key == ConsoleKey.K && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                if (cursorPos < sb.Length)
+                {
+                    sb.Remove(cursorPos, sb.Length - cursorPos);
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Ctrl+U — Kill from beginning of line to cursor ───
+            if (key.Key == ConsoleKey.U && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                if (cursorPos > 0)
+                {
+                    sb.Remove(0, cursorPos);
+                    cursorPos = 0;
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Ctrl+W — Delete word backward ───
+            if (key.Key == ConsoleKey.W && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                if (cursorPos > 0)
+                {
+                    var wordStart = cursorPos - 1;
+                    // Skip trailing whitespace
+                    while (wordStart > 0 && char.IsWhiteSpace(sb[wordStart]))
+                        wordStart--;
+                    // Skip the word
+                    while (wordStart > 0 && !char.IsWhiteSpace(sb[wordStart - 1]))
+                        wordStart--;
+
+                    sb.Remove(wordStart, cursorPos - wordStart);
+                    cursorPos = wordStart;
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Ctrl+R — Reverse history search ───
+            if (key.Key == ConsoleKey.R && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                HandleReverseSearch(sb, startLeft);
+                cursorPos = sb.Length;
+                startLeft = RedisplayLineGetStartLeft(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── Escape — Clear line ───
+            if (key.Key == ConsoleKey.Escape)
+            {
+                sb.Clear();
+                cursorPos = 0;
+                RedisplayLine(startLeft, sb, cursorPos);
+                continue;
+            }
+
+            // ─── Tab — Completion ───
             if (key.Key == ConsoleKey.Tab)
             {
-                HandleTabCompletion(sb, left);
+                HandleTabCompletion(sb, ref cursorPos, startLeft);
                 continue;
             }
 
+            // ─── Normal character ───
             if (!char.IsControl(key.KeyChar))
             {
-                sb.Append(key.KeyChar);
-                Console.Write(key.KeyChar);
+                sb.Insert(cursorPos, key.KeyChar);
+                cursorPos++;
+                RedisplayLine(startLeft, sb, cursorPos);
+                continue;
             }
         }
     }
 
     /// <summary>
+    /// Redisplays the current input line on the terminal from the given start position.
+    /// Clears any previous content and positions the cursor correctly.
+    /// </summary>
+    /// <param name="startLeft">The starting column position of the input.</param>
+    /// <param name="sb">The input buffer.</param>
+    /// <param name="cursorPos">The desired cursor position within the buffer.</param>
+    private static void RedisplayLine(int startLeft, StringBuilder sb, int cursorPos)
+    {
+        // Calculate how many columns the previous display occupied
+        var text = sb.ToString();
+
+        // Move cursor to start position, clear to end of line, write text
+        Console.SetCursorPosition(startLeft, Console.CursorTop);
+        Console.Write(text);
+        Console.Write(' '); // Clear one extra char in case of deletion
+
+        // Position cursor
+        SetCursorPosition(startLeft, sb, cursorPos);
+    }
+
+    /// <summary>
+    /// Redisplays the line and returns the new startLeft (used after Ctrl+R which re-renders prompt).
+    /// </summary>
+    private static int RedisplayLineGetStartLeft(int startLeft, StringBuilder sb, int cursorPos)
+    {
+        var text = sb.ToString();
+        Console.SetCursorPosition(startLeft, Console.CursorTop);
+        Console.Write(text);
+        Console.Write(' ');
+        SetCursorPosition(startLeft, sb, cursorPos);
+        return startLeft;
+    }
+
+    /// <summary>
+    /// Sets the cursor position based on a character offset within the buffer.
+    /// Handles line wrapping by computing the actual column and row.
+    /// </summary>
+    /// <param name="startLeft">The starting column where input begins.</param>
+    /// <param name="sb">The input buffer (used for length calculation).</param>
+    /// <param name="charOffset">The character offset within the buffer.</param>
+    /// <param name="maxLength">Optional max length to use for calculations (defaults to sb.Length).</param>
+    private static void SetCursorPosition(int startLeft, StringBuilder sb, int charOffset, int? maxLength = null)
+    {
+        var windowWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 80;
+        var effectiveLen = maxLength ?? sb.Length;
+        var totalWidth = startLeft + effectiveLen;
+        var cursorAbsolute = startLeft + charOffset;
+
+        var startRow = Console.CursorTop - ((startLeft + effectiveLen) / windowWidth);
+
+        // If the text wraps, compute the row offset
+        if (totalWidth >= windowWidth)
+        {
+            // How many rows the text occupies
+            var cursorRow = startRow + (cursorAbsolute / windowWidth);
+            var cursorCol = cursorAbsolute % windowWidth;
+            Console.SetCursorPosition(cursorCol, cursorRow);
+        }
+        else
+        {
+            Console.SetCursorPosition(cursorAbsolute, Console.CursorTop);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Reverse History Search (Ctrl+R)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Handles Ctrl+R reverse incremental history search.
+    /// Shows a "(reverse-i-search)`query': match" prompt, updating in real-time
+    /// as the user types. Ctrl+R cycles to older matches. Enter accepts, 
+    /// Ctrl+C/Esc cancels.
+    /// </summary>
+    /// <param name="sb">The input buffer to populate with the selected match.</param>
+    /// <param name="startLeft">The starting cursor column.</param>
+    private void HandleReverseSearch(StringBuilder sb, int startLeft)
+    {
+        var query = new StringBuilder();
+        var matches = new List<string>();
+        var matchIndex = -1;
+
+        while (true)
+        {
+            // Clear current line and show search prompt
+            Console.SetCursorPosition(startLeft, Console.CursorTop);
+            Console.Write(new string(' ', Math.Max(sb.Length + 20, 40)));
+            Console.SetCursorPosition(startLeft, Console.CursorTop);
+
+            var queryStr = query.ToString();
+            var matchStr = matchIndex >= 0 && matchIndex < matches.Count ? matches[matchIndex] : "";
+            Console.Write($"\x1b[1;33m(reverse-i-search)`{queryStr}`: \x1b[0m{matchStr}");
+
+            var key = Console.ReadKey(true);
+
+            if (key.Key == ConsoleKey.Enter)
+            {
+                // Accept match
+                Console.SetCursorPosition(startLeft, Console.CursorTop);
+                Console.Write(new string(' ', queryStr.Length + matchStr.Length + 30));
+                Console.SetCursorPosition(startLeft, Console.CursorTop);
+
+                sb.Clear();
+                if (matchIndex >= 0 && matchIndex < matches.Count)
+                    sb.Append(matches[matchIndex]);
+                else
+                    sb.Append(queryStr);
+                return;
+            }
+
+            if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                // Cancel — restore original line
+                Console.SetCursorPosition(startLeft, Console.CursorTop);
+                Console.Write(new string(' ', queryStr.Length + matchStr.Length + 30));
+                Console.SetCursorPosition(startLeft, Console.CursorTop);
+                Console.Write(sb.ToString());
+                return;
+            }
+
+            if (key.Key == ConsoleKey.Escape)
+            {
+                // Cancel — restore original line
+                Console.SetCursorPosition(startLeft, Console.CursorTop);
+                Console.Write(new string(' ', queryStr.Length + matchStr.Length + 30));
+                Console.SetCursorPosition(startLeft, Console.CursorTop);
+                Console.Write(sb.ToString());
+                return;
+            }
+
+            if (key.Key == ConsoleKey.R && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                // Cycle to next older match
+                if (matches.Count > 0 && matchIndex + 1 < matches.Count)
+                {
+                    matchIndex++;
+                }
+                continue;
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (query.Length > 0)
+                {
+                    query.Remove(query.Length - 1, 1);
+                    // Re-search with shorter query
+                    matches = _history.SearchEntries(query.ToString()).ToList();
+                    matchIndex = matches.Count > 0 ? 0 : -1;
+                }
+                continue;
+            }
+
+            // Normal character — add to query and search
+            if (!char.IsControl(key.KeyChar))
+            {
+                query.Append(key.KeyChar);
+                matches = _history.SearchEntries(query.ToString()).ToList();
+                matchIndex = matches.Count > 0 ? 0 : -1;
+                continue;
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Tab Completion
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
     /// Handles tab completion for the current input.
+    /// Supports command completion, file/path completion with tilde and variable
+    /// expansion, and directory-only completion for <c>cd</c>.
     /// </summary>
     /// <param name="sb">The current input buffer.</param>
+    /// <param name="cursorPos">The current cursor position (may be updated).</param>
     /// <param name="left">The starting cursor column.</param>
-    private void HandleTabCompletion(StringBuilder sb, int left)
+    private void HandleTabCompletion(StringBuilder sb, ref int cursorPos, int left)
     {
         var input = sb.ToString();
         if (string.IsNullOrEmpty(input))
             return;
 
-        // Find the last word being typed
-        var lastSpace = input.LastIndexOf(' ');
-        var prefix = lastSpace >= 0 ? input[(lastSpace + 1)..] : input;
-        var hasSpace = lastSpace >= 0;
+        // Find the word being typed at the cursor position
+        var wordStart = FindWordStart(input, cursorPos);
+        var wordEnd = FindWordEnd(input, cursorPos);
+        var prefix = input[wordStart..cursorPos];
+        var isFirstWord = IsFirstWord(input, wordStart);
 
-        if (!hasSpace)
+        if (isFirstWord)
         {
             // Command completion — check builtins, functions, aliases, then executables
             var matches = new List<string>();
@@ -652,69 +988,243 @@ public sealed class RadianceShell
                     matches.Add(name);
             }
 
-            // Executables in PATH
-            try
+            // Executables in PATH (cached)
+            foreach (var name in GetPathExecutables())
             {
-                var pathDirs = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator);
-                foreach (var dir in pathDirs)
-                {
-                    try
-                    {
-                        if (!Directory.Exists(dir))
-                            continue;
-                        foreach (var file in Directory.EnumerateFiles(dir, $"{prefix}*"))
-                        {
-                            var name = Path.GetFileName(file);
-                            if (!matches.Contains(name))
-                                matches.Add(name);
-                        }
-                    }
-                    catch { /* ignore permission errors */ }
-                }
+                if (name.StartsWith(prefix, StringComparison.Ordinal) && !matches.Contains(name))
+                    matches.Add(name);
             }
-            catch { /* ignore */ }
 
-            ApplyCompletion(matches, sb, left, prefix);
+            ApplyCompletion(matches, sb, ref cursorPos, left, wordStart, prefix);
         }
         else
         {
             // File/directory completion
-            var matches = new List<string>();
-
-            try
-            {
-                var dir = Path.GetDirectoryName(prefix);
-                var filePrefix = Path.GetFileName(prefix);
-
-                if (string.IsNullOrEmpty(dir))
-                    dir = _context.CurrentDirectory;
-
-                if (Directory.Exists(dir))
-                {
-                    foreach (var entry in Directory.EnumerateFileSystemEntries(dir, $"{filePrefix}*"))
-                    {
-                        var name = Path.GetFileName(entry);
-                        if (Directory.Exists(entry))
-                            name += Path.DirectorySeparatorChar;
-                        matches.Add(name);
-                    }
-                }
-            }
-            catch { /* ignore */ }
-
-            ApplyCompletion(matches, sb, left, prefix, lastSpace + 1);
+            var commandName = GetCommandName(input);
+            var dirsOnly = commandName is "cd" or "pushd" or "popd" or "rmdir" or "mkdir";
+            var matches = CompletePath(prefix, dirsOnly);
+            ApplyCompletion(matches, sb, ref cursorPos, left, wordStart, prefix);
         }
     }
 
     /// <summary>
+    /// Completes a file/directory path with support for tilde expansion,
+    /// environment variable expansion, and absolute paths.
+    /// </summary>
+    /// <param name="prefix">The path prefix to complete.</param>
+    /// <param name="dirsOnly">If true, only return directories.</param>
+    /// <returns>A list of matching completions.</returns>
+    private List<string> CompletePath(string prefix, bool dirsOnly)
+    {
+        var matches = new List<string>();
+
+        try
+        {
+            // Expand ~ and $VAR in the prefix for searching
+            var expandedPrefix = ExpandPathPrefix(prefix);
+            string dir;
+            string filePrefix;
+
+            if (expandedPrefix.Contains(Path.DirectorySeparatorChar) || expandedPrefix.Contains('/'))
+            {
+                dir = Path.GetDirectoryName(expandedPrefix) ?? "";
+                filePrefix = Path.GetFileName(expandedPrefix);
+
+                // Handle case where path ends with / (e.g., "/opt/")
+                if ((expandedPrefix.EndsWith('/') || expandedPrefix.EndsWith(Path.DirectorySeparatorChar))
+                    && string.IsNullOrEmpty(filePrefix))
+                {
+                    dir = expandedPrefix.TrimEnd('/', Path.DirectorySeparatorChar);
+                    filePrefix = "";
+                }
+
+                if (string.IsNullOrEmpty(dir))
+                    dir = _context.CurrentDirectory;
+            }
+            else
+            {
+                dir = _context.CurrentDirectory;
+                filePrefix = expandedPrefix;
+            }
+
+            if (!Directory.Exists(dir))
+                return matches;
+
+            foreach (var entry in Directory.EnumerateFileSystemEntries(dir, $"{filePrefix}*"))
+            {
+                var isDir = Directory.Exists(entry);
+                if (dirsOnly && !isDir)
+                    continue;
+
+                var name = Path.GetFileName(entry);
+
+                // Preserve the original prefix path (with ~ or $VAR) in the completion
+                // by computing the replacement relative to the expanded prefix
+                if (isDir)
+                    name += Path.DirectorySeparatorChar;
+
+                matches.Add(name);
+            }
+        }
+        catch { /* ignore permission errors */ }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// Expands ~ and $VAR at the beginning of a path prefix for completion searching.
+    /// Returns the expanded absolute path, but the completion result preserves
+    /// the original prefix form.
+    /// </summary>
+    /// <param name="prefix">The raw path prefix (may contain ~ or $VAR).</param>
+    /// <returns>The expanded absolute path.</returns>
+    private string ExpandPathPrefix(string prefix)
+    {
+        // Handle tilde expansion
+        if (prefix.StartsWith("~/"))
+        {
+            var home = Environment.GetEnvironmentVariable("HOME") ?? "";
+            return home + prefix[1..];
+        }
+
+        if (prefix == "~")
+        {
+            return Environment.GetEnvironmentVariable("HOME") ?? "";
+        }
+
+        // Handle ~user expansion
+        if (prefix.Length > 1 && prefix[0] == '~' && prefix[1] != '/')
+        {
+            var slashIdx = prefix.IndexOf('/');
+            var username = slashIdx >= 0 ? prefix[1..slashIdx] : prefix[1..];
+            // On macOS/Linux, ~user expands to /Users/user or /home/user
+            var userHome = Path.Combine("/Users", username);
+            if (!Directory.Exists(userHome))
+                userHome = Path.Combine("/home", username);
+            if (Directory.Exists(userHome))
+            {
+                return slashIdx >= 0 ? userHome + prefix[slashIdx..] : userHome;
+            }
+        }
+
+        // Handle $VAR/... expansion
+        if (prefix.StartsWith('$'))
+        {
+            var slashIdx = prefix.IndexOf('/');
+            var varName = slashIdx >= 0 ? prefix[1..slashIdx] : prefix[1..];
+            var value = _context.GetVariable(varName);
+            if (!string.IsNullOrEmpty(value))
+            {
+                return slashIdx >= 0 ? value + prefix[slashIdx..] : value;
+            }
+        }
+
+        // Handle absolute paths
+        if (prefix.StartsWith('/'))
+            return prefix;
+
+        // Relative path — resolve against CWD
+        return Path.GetFullPath(Path.Combine(_context.CurrentDirectory, prefix));
+    }
+
+    /// <summary>
+    /// Finds the start index of the word at the given cursor position.
+    /// A word boundary is a space character.
+    /// </summary>
+    private static int FindWordStart(string input, int cursorPos)
+    {
+        var i = cursorPos - 1;
+        while (i >= 0 && input[i] != ' ')
+            i--;
+        return i + 1;
+    }
+
+    /// <summary>
+    /// Finds the end index of the word at the given cursor position.
+    /// </summary>
+    private static int FindWordEnd(string input, int cursorPos)
+    {
+        var i = cursorPos;
+        while (i < input.Length && input[i] != ' ')
+            i++;
+        return i;
+    }
+
+    /// <summary>
+    /// Determines if the word at the given start position is the first word
+    /// in the command (i.e., command position).
+    /// </summary>
+    private static bool IsFirstWord(string input, int wordStart)
+    {
+        for (var i = 0; i < wordStart; i++)
+        {
+            if (input[i] != ' ')
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Gets the command name (first word) from the input line.
+    /// </summary>
+    private static string GetCommandName(string input)
+    {
+        var trimmed = input.TrimStart();
+        var end = 0;
+        while (end < trimmed.Length && trimmed[end] != ' ')
+            end++;
+        return trimmed[..end];
+    }
+
+    /// <summary>
+    /// Gets all executable names from PATH directories, using a cache.
+    /// </summary>
+    private List<string> GetPathExecutables()
+    {
+        // Use cache if fresh
+        if (_pathExecutableCache is not null && DateTime.Now - _pathCacheTime < PathCacheTimeout)
+            return _pathExecutableCache;
+
+        var executables = new HashSet<string>(StringComparer.Ordinal);
+
+        try
+        {
+            var pathDirs = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator);
+            foreach (var dir in pathDirs)
+            {
+                try
+                {
+                    if (!Directory.Exists(dir))
+                        continue;
+                    foreach (var file in Directory.EnumerateFiles(dir))
+                    {
+                        var name = Path.GetFileName(file);
+                        if (!string.IsNullOrEmpty(name))
+                            executables.Add(name);
+                    }
+                }
+                catch { /* ignore permission errors */ }
+            }
+        }
+        catch { /* ignore */ }
+
+        _pathExecutableCache = executables.ToList();
+        _pathCacheTime = DateTime.Now;
+        return _pathExecutableCache;
+    }
+
+    /// <summary>
     /// Applies tab completion results to the input buffer.
+    /// Handles single match (complete), common prefix completion, and
+    /// displaying multiple matches in columns.
     /// </summary>
     /// <param name="matches">The completion candidates.</param>
     /// <param name="sb">The input buffer.</param>
+    /// <param name="cursorPos">The cursor position (may be updated).</param>
     /// <param name="left">The starting cursor column.</param>
+    /// <param name="wordStart">The index where the current word starts in the buffer.</param>
     /// <param name="prefix">The text being completed.</param>
-    /// <param name="replaceStart">The index in the buffer to start replacing from (-1 for end of word before prefix).</param>
-    private void ApplyCompletion(List<string> matches, StringBuilder sb, int left, string prefix, int replaceStart = -1)
+    private void ApplyCompletion(List<string> matches, StringBuilder sb, ref int cursorPos, int left, int wordStart, string prefix)
     {
         if (matches.Count == 0)
             return;
@@ -723,31 +1233,26 @@ public sealed class RadianceShell
         {
             // Single match — complete it
             var completion = matches[0];
-            var startPos = replaceStart >= 0 ? replaceStart : sb.Length - prefix.Length;
-
-            ClearCurrentLine(left, sb.Length);
-            sb.Remove(startPos, sb.Length - startPos);
-            sb.Append(completion);
-            Console.SetCursorPosition(left, Console.CursorTop);
-            Console.Write(sb.ToString());
+            sb.Remove(wordStart, cursorPos - wordStart);
+            sb.Insert(wordStart, completion);
+            cursorPos = wordStart + completion.Length;
+            RedisplayLine(left, sb, cursorPos);
         }
         else
         {
-            // Multiple matches — find common prefix and complete that
+            // Multiple matches — find common prefix
             var commonPrefix = FindCommonPrefix(matches);
             if (commonPrefix.Length > prefix.Length)
             {
-                var startPos = replaceStart >= 0 ? replaceStart : sb.Length - prefix.Length;
                 var toAdd = commonPrefix[prefix.Length..];
-
-                ClearCurrentLine(left, sb.Length);
-                sb.Append(toAdd);
-                Console.SetCursorPosition(left, Console.CursorTop);
-                Console.Write(sb.ToString());
+                sb.Remove(wordStart, cursorPos - wordStart);
+                sb.Insert(wordStart, commonPrefix);
+                cursorPos = wordStart + commonPrefix.Length;
+                RedisplayLine(left, sb, cursorPos);
             }
             else
             {
-                // Show all matches
+                // Show all matches in columns
                 Console.WriteLine();
                 var maxNameLen = matches.Max(m => m.Length) + 2;
                 var cols = Math.Max(1, Console.WindowWidth / maxNameLen);
@@ -765,7 +1270,9 @@ public sealed class RadianceShell
                 // Re-display prompt and current input
                 var prompt = Prompt.Render(_context);
                 Console.Write(prompt);
+                left = Console.CursorLeft;
                 Console.Write(sb.ToString());
+                SetCursorPosition(left, sb, cursorPos);
             }
         }
     }
@@ -800,6 +1307,10 @@ public sealed class RadianceShell
         Console.Write(new string(' ', length));
         Console.SetCursorPosition(startLeft, Console.CursorTop);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Initialization
+    // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
     /// Initializes the execution context with default environment variables.
