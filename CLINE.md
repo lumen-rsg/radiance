@@ -88,6 +88,28 @@ Radiance/
 
 ## Changelog
 
+### [1.0.1] — Tab Completion Fix & QoL ✅
+
+**Bug Fixes:**
+
+*Tab Completion:*
+- **Fixed path completion replacing entire line** — `ls /opt/` + TAB now correctly produces `/opt/angara/`, `/opt/homebrew/` etc. instead of just `angara/`, `homebrew/` which replaced the `/opt/` prefix
+- Rewrote `CompletePath()` to split prefix at last `/`, preserve the original directory part (with `~`, `$VAR` etc.), and return full completion paths
+- Fixed `startLeft` not updating after multiple-match display — `ApplyCompletion()` now passes `startLeft` by `ref` so prompt re-render propagates back to `ReadLine()`
+
+*Line Editing:*
+- Fixed display artifacts on large deletions (Ctrl+U, Ctrl+K, backspace) — `RedisplayLine()` now uses ANSI escape `\x1b[K` (clear to end of line) instead of clearing just one character
+
+*Completion Behavior:*
+- Hidden files (dot-files) are now excluded from completion unless the prefix starts with `.` (standard BASH behavior)
+
+*Cleanup:*
+- Removed unused `ClearCurrentLine()` method and unused `FindWordEnd()` method
+- Removed unused `wordEnd` variable and `toAdd` variable in completion code
+
+**Modified files:**
+- `src/Shell/RadianceShell.cs` — all fixes above
+
 ### [1.0.0] — Phase 8: Testing & Hardening ✅
 
 **Test Suite (219 tests, all passing):**

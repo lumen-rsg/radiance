@@ -759,7 +759,7 @@ public sealed class RadianceShell
             // ─── Tab — Completion ───
             if (key.Key == ConsoleKey.Tab)
             {
-                HandleTabCompletion(sb, ref cursorPos, startLeft);
+                HandleTabCompletion(sb, ref cursorPos, ref startLeft);
                 continue;
             }
 
@@ -783,13 +783,12 @@ public sealed class RadianceShell
     /// <param name="cursorPos">The desired cursor position within the buffer.</param>
     private static void RedisplayLine(int startLeft, StringBuilder sb, int cursorPos)
     {
-        // Calculate how many columns the previous display occupied
         var text = sb.ToString();
 
-        // Move cursor to start position, clear to end of line, write text
+        // Move cursor to start position, write text, clear any remaining old content
         Console.SetCursorPosition(startLeft, Console.CursorTop);
         Console.Write(text);
-        Console.Write(' '); // Clear one extra char in case of deletion
+        Console.Write("\x1b[K"); // ANSI: clear from cursor to end of line
 
         // Position cursor
         SetCursorPosition(startLeft, sb, cursorPos);
@@ -803,7 +802,7 @@ public sealed class RadianceShell
         var text = sb.ToString();
         Console.SetCursorPosition(startLeft, Console.CursorTop);
         Console.Write(text);
-        Console.Write(' ');
+        Console.Write("\x1b[K"); // ANSI: clear from cursor to end of line
         SetCursorPosition(startLeft, sb, cursorPos);
         return startLeft;
     }
@@ -950,7 +949,7 @@ public sealed class RadianceShell
     /// <param name="sb">The current input buffer.</param>
     /// <param name="cursorPos">The current cursor position (may be updated).</param>
     /// <param name="left">The starting cursor column.</param>
-    private void HandleTabCompletion(StringBuilder sb, ref int cursorPos, int left)
+    private void HandleTabCompletion(StringBuilder sb, ref int cursorPos, ref int startLeft)
     {
         var input = sb.ToString();
         if (string.IsNullOrEmpty(input))
@@ -958,7 +957,6 @@ public sealed class RadianceShell
 
         // Find the word being typed at the cursor position
         var wordStart = FindWordStart(input, cursorPos);
-        var wordEnd = FindWordEnd(input, cursorPos);
         var prefix = input[wordStart..cursorPos];
         var isFirstWord = IsFirstWord(input, wordStart);
 
@@ -995,7 +993,7 @@ public sealed class RadianceShell
                     matches.Add(name);
             }
 
-            ApplyCompletion(matches, sb, ref cursorPos, left, wordStart, prefix);
+            ApplyCompletion(matches, sb, ref cursorPos, ref startLeft, wordStart, prefix);
         }
         else
         {
@@ -1003,7 +1001,7 @@ public sealed class RadianceShell
             var commandName = GetCommandName(input);
             var dirsOnly = commandName is "cd" or "pushd" or "popd" or "rmdir" or "mkdir";
             var matches = CompletePath(prefix, dirsOnly);
-            ApplyCompletion(matches, sb, ref cursorPos, left, wordStart, prefix);
+            ApplyCompletion(matches, sb, ref cursorPos, ref startLeft, wordStart, prefix);
         }
     }
 
@@ -1020,37 +1018,33 @@ public sealed class RadianceShell
 
         try
         {
-            // Expand ~ and $VAR in the prefix for searching
-            var expandedPrefix = ExpandPathPrefix(prefix);
-            string dir;
+            // Find the directory boundary in the original prefix.
+            // Everything up to and including the last '/' is the directory part;
+            // everything after is the filename prefix to match against.
+            var lastSlash = prefix.LastIndexOf('/');
+            string originalDirPart;
             string filePrefix;
 
-            if (expandedPrefix.Contains(Path.DirectorySeparatorChar) || expandedPrefix.Contains('/'))
+            if (lastSlash >= 0)
             {
-                dir = Path.GetDirectoryName(expandedPrefix) ?? "";
-                filePrefix = Path.GetFileName(expandedPrefix);
-
-                // Handle case where path ends with / (e.g., "/opt/")
-                if ((expandedPrefix.EndsWith('/') || expandedPrefix.EndsWith(Path.DirectorySeparatorChar))
-                    && string.IsNullOrEmpty(filePrefix))
-                {
-                    dir = expandedPrefix.TrimEnd('/', Path.DirectorySeparatorChar);
-                    filePrefix = "";
-                }
-
-                if (string.IsNullOrEmpty(dir))
-                    dir = _context.CurrentDirectory;
+                originalDirPart = prefix[..(lastSlash + 1)]; // e.g. "/opt/", "~/", "src/"
+                filePrefix = prefix[(lastSlash + 1)..];       // e.g. "", "an", "te"
             }
             else
             {
-                dir = _context.CurrentDirectory;
-                filePrefix = expandedPrefix;
+                originalDirPart = "";
+                filePrefix = prefix;
             }
 
-            if (!Directory.Exists(dir))
+            // Expand the directory part for actual filesystem search
+            var searchDir = string.IsNullOrEmpty(originalDirPart)
+                ? _context.CurrentDirectory
+                : ExpandPathPrefix(originalDirPart).TrimEnd('/', Path.DirectorySeparatorChar);
+
+            if (!Directory.Exists(searchDir))
                 return matches;
 
-            foreach (var entry in Directory.EnumerateFileSystemEntries(dir, $"{filePrefix}*"))
+            foreach (var entry in Directory.EnumerateFileSystemEntries(searchDir, $"{filePrefix}*"))
             {
                 var isDir = Directory.Exists(entry);
                 if (dirsOnly && !isDir)
@@ -1058,12 +1052,16 @@ public sealed class RadianceShell
 
                 var name = Path.GetFileName(entry);
 
-                // Preserve the original prefix path (with ~ or $VAR) in the completion
-                // by computing the replacement relative to the expanded prefix
-                if (isDir)
-                    name += Path.DirectorySeparatorChar;
+                // Hide dot-files unless the file prefix starts with a dot (BASH behavior)
+                if (name.StartsWith('.') && !filePrefix.StartsWith('.'))
+                    continue;
 
-                matches.Add(name);
+                if (isDir)
+                    name += '/';
+
+                // Return the full completion: original dir part + filename
+                // This preserves ~, $VAR, etc. in the user's typed prefix
+                matches.Add(originalDirPart + name);
             }
         }
         catch { /* ignore permission errors */ }
@@ -1140,17 +1138,6 @@ public sealed class RadianceShell
     }
 
     /// <summary>
-    /// Finds the end index of the word at the given cursor position.
-    /// </summary>
-    private static int FindWordEnd(string input, int cursorPos)
-    {
-        var i = cursorPos;
-        while (i < input.Length && input[i] != ' ')
-            i++;
-        return i;
-    }
-
-    /// <summary>
     /// Determines if the word at the given start position is the first word
     /// in the command (i.e., command position).
     /// </summary>
@@ -1224,7 +1211,7 @@ public sealed class RadianceShell
     /// <param name="left">The starting cursor column.</param>
     /// <param name="wordStart">The index where the current word starts in the buffer.</param>
     /// <param name="prefix">The text being completed.</param>
-    private void ApplyCompletion(List<string> matches, StringBuilder sb, ref int cursorPos, int left, int wordStart, string prefix)
+    private void ApplyCompletion(List<string> matches, StringBuilder sb, ref int cursorPos, ref int startLeft, int wordStart, string prefix)
     {
         if (matches.Count == 0)
             return;
@@ -1236,7 +1223,7 @@ public sealed class RadianceShell
             sb.Remove(wordStart, cursorPos - wordStart);
             sb.Insert(wordStart, completion);
             cursorPos = wordStart + completion.Length;
-            RedisplayLine(left, sb, cursorPos);
+            RedisplayLine(startLeft, sb, cursorPos);
         }
         else
         {
@@ -1244,11 +1231,10 @@ public sealed class RadianceShell
             var commonPrefix = FindCommonPrefix(matches);
             if (commonPrefix.Length > prefix.Length)
             {
-                var toAdd = commonPrefix[prefix.Length..];
                 sb.Remove(wordStart, cursorPos - wordStart);
                 sb.Insert(wordStart, commonPrefix);
                 cursorPos = wordStart + commonPrefix.Length;
-                RedisplayLine(left, sb, cursorPos);
+                RedisplayLine(startLeft, sb, cursorPos);
             }
             else
             {
@@ -1270,9 +1256,9 @@ public sealed class RadianceShell
                 // Re-display prompt and current input
                 var prompt = Prompt.Render(_context);
                 Console.Write(prompt);
-                left = Console.CursorLeft;
+                startLeft = Console.CursorLeft;
                 Console.Write(sb.ToString());
-                SetCursorPosition(left, sb, cursorPos);
+                SetCursorPosition(startLeft, sb, cursorPos);
             }
         }
     }
@@ -1296,16 +1282,6 @@ public sealed class RadianceShell
         }
 
         return prefix;
-    }
-
-    /// <summary>
-    /// Clears the current line content on screen.
-    /// </summary>
-    private static void ClearCurrentLine(int startLeft, int length)
-    {
-        Console.SetCursorPosition(startLeft, Console.CursorTop);
-        Console.Write(new string(' ', length));
-        Console.SetCursorPosition(startLeft, Console.CursorTop);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
