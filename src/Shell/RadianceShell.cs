@@ -3,6 +3,7 @@ using Radiance.Builtins;
 using Radiance.Interpreter;
 using Radiance.Lexer;
 using Radiance.Parser;
+using Radiance.Utils;
 
 namespace Radiance.Shell;
 
@@ -10,10 +11,13 @@ namespace Radiance.Shell;
 /// The main interactive shell (REPL loop). Reads input, tokenizes with the lexer,
 /// parses into an AST, and interprets via the AST-walking interpreter.
 /// Supports multi-line input for control flow constructs (if/for/while/case/function).
-/// Handles alias expansion, background jobs, and tab completion.
+/// Handles alias expansion, background jobs, tab completion, script execution,
+/// and persistent history.
 /// </summary>
 public sealed class RadianceShell
 {
+    private const string Version = "0.7.0";
+
     private readonly ShellContext _context;
     private readonly BuiltinRegistry _builtins;
     private readonly ProcessManager _processManager;
@@ -41,6 +45,13 @@ public sealed class RadianceShell
         ["case"] = "esac"
     };
 
+    /// <summary>
+    /// Path to the user configuration file sourced on startup.
+    /// </summary>
+    private static readonly string ConfigFilePath = Path.Combine(
+        Environment.GetEnvironmentVariable("HOME") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".radiance_rc");
+
     public RadianceShell()
     {
         _context = InitializeContext();
@@ -61,14 +72,24 @@ public sealed class RadianceShell
             _running = false;
             _context.LastExitCode = code;
         };
+
+        // Wire up the script executor callback for the source builtin
+        _context.ScriptExecutor = ExecuteInContext;
     }
 
     /// <summary>
     /// Starts the interactive REPL loop.
+    /// Loads history and sources config before starting.
     /// </summary>
     /// <returns>The final exit code.</returns>
     public int Run()
     {
+        // Load persistent history
+        _history.Load();
+
+        // Source user config if it exists
+        SourceConfig();
+
         PrintWelcome();
 
         while (_running)
@@ -99,7 +120,181 @@ public sealed class RadianceShell
             ExecuteInput(input);
         }
 
+        // Save persistent history on exit
+        _history.Save();
+
         return _context.LastExitCode;
+    }
+
+    /// <summary>
+    /// Executes a script file in a new shell context.
+    /// Sets $0 to the script path and $1..$n to the provided arguments.
+    /// </summary>
+    /// <param name="scriptPath">The path to the script file.</param>
+    /// <param name="args">The arguments (args[0] = $0, args[1..] = $1..$n).</param>
+    /// <returns>The exit code of the script.</returns>
+    public int ExecuteScript(string scriptPath, string[] args)
+    {
+        try
+        {
+            var content = File.ReadAllText(scriptPath);
+
+            // Skip shebang line if present
+            if (content.StartsWith("#!"))
+            {
+                var newlineIdx = content.IndexOf('\n');
+                if (newlineIdx >= 0)
+                    content = content[(newlineIdx + 1)..];
+                else
+                    content = string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(content))
+                return 0;
+
+            // Set up script context
+            _context.ShellName = scriptPath;
+
+            // Set positional parameters
+            var positionalParams = new List<string>();
+            for (var i = 1; i < args.Length; i++)
+            {
+                positionalParams.Add(args[i]);
+            }
+            _context.SetPositionalParams(positionalParams);
+
+            // Set script-related variables
+            _context.SetVariable("BASH_SOURCE", scriptPath);
+
+            return ExecuteInContext(content, args);
+        }
+        catch (Exception ex)
+        {
+            ColorOutput.WriteError($"{scriptPath}: {ex.Message}");
+            return 126;
+        }
+    }
+
+    /// <summary>
+    /// Executes an inline command string (non-interactive mode, e.g., <c>radiance -c "command"</c>).
+    /// </summary>
+    /// <param name="command">The command string to execute.</param>
+    /// <param name="args">Optional positional parameters (args[0] = $0, args[1..] = $1..$n).</param>
+    /// <returns>The exit code of the command.</returns>
+    public int ExecuteString(string command, string[]? args = null)
+    {
+        args ??= ["radiance"];
+
+        _context.ShellName = args[0];
+
+        if (args.Length > 1)
+        {
+            var positionalParams = new List<string>();
+            for (var i = 1; i < args.Length; i++)
+            {
+                positionalParams.Add(args[i]);
+            }
+            _context.SetPositionalParams(positionalParams);
+        }
+
+        return ExecuteInContext(command, args);
+    }
+
+    /// <summary>
+    /// Executes a script string in the current shell context.
+    /// Used by the <c>source</c> builtin and script execution.
+    /// Preserves and restores positional parameters for sourcing.
+    /// </summary>
+    /// <param name="content">The script content to execute.</param>
+    /// <param name="args">The arguments (for positional parameter setup during sourcing).</param>
+    /// <returns>The exit code.</returns>
+    private int ExecuteInContext(string content, string[] args)
+    {
+        // Save and set positional parameters if args provided
+        var hadPositionalParams = args.Length > 1;
+        List<string>? savedParams = null;
+        if (hadPositionalParams)
+        {
+            savedParams = _context.PositionalParams.ToList();
+            var newParams = new List<string>();
+            for (var i = 1; i < args.Length; i++)
+            {
+                newParams.Add(args[i]);
+            }
+            _context.SetPositionalParams(newParams);
+        }
+
+        try
+        {
+            // Expand aliases in the input
+            var expandedInput = ExpandAliases(content);
+
+            // Lex: input → tokens
+            var lexer = new Lexer.Lexer(expandedInput);
+            var tokens = lexer.Tokenize();
+
+            // Parse: tokens → AST
+            var parser = new Radiance.Parser.Parser(tokens);
+            var ast = parser.Parse();
+
+            if (ast is null)
+                return 0;
+
+            // Interpret: AST → execution
+            return _interpreter.Execute(ast);
+        }
+        catch (Exception ex)
+        {
+            ColorOutput.WriteError(ex.Message);
+            return 1;
+        }
+        finally
+        {
+            // Restore positional parameters if we changed them
+            if (hadPositionalParams && savedParams is not null)
+            {
+                _context.SetPositionalParams(savedParams);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sources the user configuration file if it exists.
+    /// </summary>
+    private void SourceConfig()
+    {
+        if (!File.Exists(ConfigFilePath))
+            return;
+
+        try
+        {
+            var content = File.ReadAllText(ConfigFilePath);
+            if (string.IsNullOrWhiteSpace(content))
+                return;
+
+            // Execute silently — errors don't abort the shell
+            try
+            {
+                var expandedInput = ExpandAliases(content);
+                var lexer = new Lexer.Lexer(expandedInput);
+                var tokens = lexer.Tokenize();
+                var parser = new Radiance.Parser.Parser(tokens);
+                var ast = parser.Parse();
+
+                if (ast is not null)
+                {
+                    _interpreter.Execute(ast);
+                }
+            }
+            catch (Exception ex)
+            {
+                ColorOutput.WriteWarning($"config: {ConfigFilePath}: {ex.Message}");
+            }
+        }
+        catch
+        {
+            // Config file is optional — ignore errors
+        }
     }
 
     /// <summary>
@@ -270,7 +465,7 @@ public sealed class RadianceShell
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"radiance: error: {ex.Message}");
+            ColorOutput.WriteError(ex.Message);
             _context.LastExitCode = 1;
         }
     }
@@ -616,7 +811,7 @@ public sealed class RadianceShell
         // Set shell variables
         context.SetVariable("PWD", context.CurrentDirectory);
         context.SetVariable("SHELL", "radiance");
-        context.SetVariable("RADIANCE_VERSION", "0.6.0");
+        context.SetVariable("RADIANCE_VERSION", Version);
 
         // Export key variables
         context.ExportVariable("PATH");
@@ -633,13 +828,12 @@ public sealed class RadianceShell
     /// </summary>
     private static void PrintWelcome()
     {
-        var version = "0.6.0";
         Console.WriteLine();
-        Console.WriteLine($"\x1b[1;36m  ╭─────────────────────────────────╮\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{version} ✦\x1b[1;36m      │\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │  \x1b[37mA BASH interpreter in C#\x1b[1;36m       │\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  ╰─────────────────────────────────╯\x1b[0m");
-        Console.WriteLine($"\x1b[37m  Type 'exit' to quit, 'type' to inspect commands.\x1b[0m");
+        Console.WriteLine("\x1b[1;36m  ╭─────────────────────────────────╮\x1b[0m");
+        Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{Version} ✦\x1b[1;36m      │\x1b[0m");
+        Console.WriteLine("\x1b[1;36m  │  \x1b[37mA BASH interpreter in C#\x1b[1;36m       │\x1b[0m");
+        Console.WriteLine("\x1b[1;36m  ╰─────────────────────────────────╯\x1b[0m");
+        Console.WriteLine("\x1b[37m  Type 'exit' to quit, 'type' to inspect commands.\x1b[0m");
         Console.WriteLine();
     }
 }

@@ -43,7 +43,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | 4 | Variables & Expansion | ✅ Complete | `$VAR`, `$(cmd)`, `$((expr))`, tilde, glob |
 | 5 | Control Flow | ✅ Complete | `if`, `for`, `while`, `case` |
 | 6 | Advanced Features | ✅ Complete | Functions, aliases, job control, history, completion |
-| 7 | Script Execution & Polish | ⬜ Not Started | `.sh` files, `source`, config, colorized output |
+| 7 | Script Execution & Polish | ✅ Complete | `.sh` files, `source`, config, colorized output, bug fixes |
 | 8 | Testing & Hardening | ⬜ Not Started | Unit/integration tests, POSIX compliance |
 
 ## Project Structure
@@ -86,6 +86,76 @@ Radiance/
 ```
 
 ## Changelog
+
+### [0.7.0] — Phase 7: Script Execution & Polish ✅
+
+**Added:**
+
+**Script Execution:**
+- Updated `Program.cs` with full CLI flag handling:
+  - `radiance` — launch interactive REPL
+  - `radiance script.sh [args...]` — execute a shell script with positional parameters
+  - `radiance -c "command"` — execute an inline command string
+  - `radiance --help` / `radiance --version` — help and version output
+- Updated `RadianceShell.cs`:
+  - `RunScript()` — reads and executes a script file, sets positional parameters (`$1`–`$9`), `$0`, `$#`, `$@`
+  - `RunCommand()` — executes a `-c` command string
+  - Script execution shares the same context as interactive mode (variables, functions, aliases persist)
+
+**New Builtins:**
+- `source` / `.` (`src/Builtins/SourceCommand.cs`) — execute a script in the current shell context:
+  - `source script.sh` / `. script.sh` — reads and executes commands from a file
+  - Shares `ScriptExecutor` callback from `ShellContext` for execution
+- `read` (`src/Builtins/ReadCommand.cs`) — read a line from stdin into variables:
+  - `read VAR` — reads a line into `$VAR`
+  - `read A B C` — splits input by IFS, assigns to variables, last variable gets remainder
+  - `read -p "prompt" VAR` — displays a prompt before reading
+  - `read -r` — raw mode (no backslash escape interpretation)
+- `break` (`src/Builtins/BreakCommand.cs`) — exit loops (`break`, `break N` for N levels)
+- `continue` (`src/Builtins/ContinueCommand.cs`) — skip to next loop iteration (`continue`, `continue N`)
+
+**Control Flow Support:**
+- Updated `ShellContext` with loop control flags:
+  - `BreakRequested` / `BreakDepth` — for `break` builtin
+  - `ContinueRequested` / `ContinueDepth` — for `continue` builtin
+  - `ScriptExecutor` callback — for `source`/`.` builtin to delegate execution
+- Updated `ShellInterpreter`:
+  - `VisitFor` — checks `BreakRequested`/`ContinueRequested` after each iteration, supports depth for nested loops
+  - `VisitWhile` — same break/continue support with depth propagation
+
+**Persistent History:**
+- Updated `History` class (`src/Shell/History.cs`):
+  - `History(string filePath)` — constructor accepts a file path for persistent storage
+  - History is automatically loaded on creation and saved after each command
+  - Default path: `~/.radiance_history`
+  - `Save()` — writes all entries to disk
+  - `Load()` — reads entries from disk (called on startup)
+
+**Config File Auto-Sourcing:**
+- On startup, the shell checks for `~/.radiancerc` and auto-sources it if present
+- Runs before the interactive prompt loop starts
+- Allows users to set aliases, functions, environment variables, and prompt customizations
+
+**Colorized Output:**
+- New `ColorOutput` utility (`src/Utils/ColorOutput.cs`):
+  - `WriteError()` — red error messages to stderr
+  - `WriteWarning()` — yellow warning messages to stderr
+  - `WriteInfo()` — cyan informational messages to stderr
+
+**Critical Bug Fix — Argument Passing:**
+- Fixed a critical bug where command arguments were silently merged (e.g., `echo hello` → `echohello`, `uname -a` → empty output)
+- Root cause: The lexer skipped whitespace between tokens but didn't preserve this information, so the parser's `CollectWordParts()` incorrectly merged adjacent tokens into single words
+- Fix: Added `HasLeadingWhitespace` flag to `Token` record, tracked in the lexer's `NextToken()`, and respected in `CollectWordParts()` to stop word collection when whitespace separates tokens
+- Updated files: `Token.cs`, `Lexer.cs`, `Parser.cs`
+
+**Version bump:** 0.6.0 → 0.7.0
+
+**New files:**
+- `src/Utils/ColorOutput.cs`
+- `src/Builtins/BreakCommand.cs`
+- `src/Builtins/ContinueCommand.cs`
+- `src/Builtins/SourceCommand.cs`
+- `src/Builtins/ReadCommand.cs`
 
 ### [0.6.0] — Phase 6: Advanced Features ✅
 

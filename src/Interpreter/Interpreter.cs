@@ -301,7 +301,36 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         foreach (var item in items)
         {
             _context.SetVariable(node.VariableName, item);
+
+            // Clear continue flag before body execution
+            _context.ContinueRequested = false;
             exitCode = node.Body.Accept(this);
+
+            // Check break
+            if (_context.BreakRequested)
+            {
+                _context.BreakRequested = false;
+                if (_context.BreakDepth > 1)
+                {
+                    _context.BreakDepth--;
+                    return exitCode; // Propagate break to outer loop
+                }
+                _context.BreakDepth = 1;
+                break;
+            }
+
+            // Check continue — just move to next iteration
+            if (_context.ContinueRequested)
+            {
+                _context.ContinueRequested = false;
+                if (_context.ContinueDepth > 1)
+                {
+                    _context.ContinueDepth--;
+                    return exitCode; // Propagate continue to outer loop
+                }
+                _context.ContinueDepth = 1;
+                continue;
+            }
         }
 
         return exitCode;
@@ -335,13 +364,41 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             if (!shouldContinue)
                 break;
 
+            // Clear continue flag before body execution
+            _context.ContinueRequested = false;
             exitCode = node.Body.Accept(this);
             iterations++;
 
             if (iterations >= maxIterations)
             {
-                Console.Error.WriteLine($"radiance: warning: loop exceeded {maxIterations} iterations, breaking");
+                Radiance.Utils.ColorOutput.WriteWarning($"loop exceeded {maxIterations} iterations, breaking");
                 break;
+            }
+
+            // Check break
+            if (_context.BreakRequested)
+            {
+                _context.BreakRequested = false;
+                if (_context.BreakDepth > 1)
+                {
+                    _context.BreakDepth--;
+                    return exitCode; // Propagate break to outer loop
+                }
+                _context.BreakDepth = 1;
+                break;
+            }
+
+            // Check continue — skip to next iteration
+            if (_context.ContinueRequested)
+            {
+                _context.ContinueRequested = false;
+                if (_context.ContinueDepth > 1)
+                {
+                    _context.ContinueDepth--;
+                    return exitCode; // Propagate continue to outer loop
+                }
+                _context.ContinueDepth = 1;
+                continue;
             }
         }
 

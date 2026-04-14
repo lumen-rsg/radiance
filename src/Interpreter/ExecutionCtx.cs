@@ -82,6 +82,34 @@ public sealed class ShellContext
     /// </summary>
     public int ReturnExitCode { get; set; } = 0;
 
+    /// <summary>
+    /// Flag indicating that a <c>break</c> was triggered inside a loop.
+    /// Checked by <see cref="ShellInterpreter.VisitFor"/> and <see cref="ShellInterpreter.VisitWhile"/>.
+    /// </summary>
+    public bool BreakRequested { get; set; } = false;
+
+    /// <summary>
+    /// The number of loop levels to break out of.
+    /// </summary>
+    public int BreakDepth { get; set; } = 1;
+
+    /// <summary>
+    /// Flag indicating that a <c>continue</c> was triggered inside a loop.
+    /// Checked by <see cref="ShellInterpreter.VisitFor"/> and <see cref="ShellInterpreter.VisitWhile"/>.
+    /// </summary>
+    public bool ContinueRequested { get; set; } = false;
+
+    /// <summary>
+    /// The number of loop levels to continue past.
+    /// </summary>
+    public int ContinueDepth { get; set; } = 1;
+
+    /// <summary>
+    /// Callback for executing a script file in the current context.
+    /// Used by the <c>source</c>/<c>.</c> builtin to delegate execution to the shell.
+    /// </summary>
+    public Func<string, string[], int>? ScriptExecutor { get; set; }
+
     // ──── Variable Access (scope-aware) ────
 
     /// <summary>

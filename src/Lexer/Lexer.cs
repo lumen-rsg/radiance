@@ -13,6 +13,7 @@ public sealed class Lexer
     private int _pos;
     private int _line;
     private int _column;
+    private bool _hadLeadingWhitespace;
 
     /// <summary>
     /// Creates a new lexer for the given input string.
@@ -51,6 +52,7 @@ public sealed class Lexer
     /// </summary>
     private Token NextToken()
     {
+        _hadLeadingWhitespace = _pos < _source.Length && (_source[_pos] == ' ' || _source[_pos] == '\t');
         SkipWhitespace();
 
         if (_pos >= _source.Length)
@@ -226,7 +228,7 @@ public sealed class Lexer
         if (_pos < _source.Length)
             Advance(); // skip closing '
 
-        return new Token(TokenType.SingleQuotedString, sb.ToString(), startLine, startCol);
+        return new Token(TokenType.SingleQuotedString, sb.ToString(), startLine, startCol, _hadLeadingWhitespace);
     }
 
     /// <summary>
@@ -281,7 +283,7 @@ public sealed class Lexer
         if (_pos < _source.Length)
             Advance(); // skip closing "
 
-        return new Token(TokenType.DoubleQuotedString, sb.ToString(), startLine, startCol);
+        return new Token(TokenType.DoubleQuotedString, sb.ToString(), startLine, startCol, _hadLeadingWhitespace);
     }
 
     /// <summary>
@@ -329,7 +331,7 @@ public sealed class Lexer
         // contain '=', and the '=' must not be the first character.
         var tokenType = IsAssignmentWord(value) ? TokenType.AssignmentWord : TokenType.Word;
 
-        return new Token(tokenType, value, startLine, startCol);
+        return new Token(tokenType, value, startLine, startCol, _hadLeadingWhitespace);
     }
 
     /// <summary>
@@ -518,6 +520,6 @@ public sealed class Lexer
     /// </summary>
     private Token MakeToken(TokenType type, string value)
     {
-        return new Token(type, value, _line, _column);
+        return new Token(type, value, _line, _column, _hadLeadingWhitespace);
     }
 }

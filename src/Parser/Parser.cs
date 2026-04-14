@@ -730,6 +730,11 @@ public sealed class Parser
         while (IsWordToken())
         {
             var token = Current();
+
+            // If this token had leading whitespace, it's a separate word — stop collecting
+            if (token.HasLeadingWhitespace && wordParts.Count > 0)
+                break;
+
             switch (token.Type)
             {
                 case TokenType.Word:

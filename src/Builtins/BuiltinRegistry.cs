@@ -84,6 +84,11 @@ public sealed class BuiltinRegistry
         registry.Register(new JobsCommand());
         registry.Register(new FgCommand());
         registry.Register(new HistoryCommand());
+        registry.Register(new BreakCommand());
+        registry.Register(new ContinueCommand());
+        registry.Register(new SourceCommand());
+        registry.Register(SourceCommand.CreateDotAlias());
+        registry.Register(new ReadCommand());
         return registry;
     }
 }

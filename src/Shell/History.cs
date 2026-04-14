@@ -1,7 +1,8 @@
 namespace Radiance.Shell;
 
 /// <summary>
-/// Manages in-memory command history with navigation (up/down arrows).
+/// Manages command history with navigation (up/down arrows) and
+/// persistence across sessions via a file on disk.
 /// </summary>
 public sealed class History
 {
@@ -9,9 +10,17 @@ public sealed class History
     private int _navigationIndex = -1;
 
     /// <summary>
-    /// The maximum number of history entries to keep.
+    /// The maximum number of history entries to keep in memory.
     /// </summary>
     public int MaxEntries { get; set; } = 1000;
+
+    /// <summary>
+    /// The path to the history file for persistent storage.
+    /// Defaults to <c>~/.radiance_history</c>.
+    /// </summary>
+    public string FilePath { get; set; } = Path.Combine(
+        Environment.GetEnvironmentVariable("HOME") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".radiance_history");
 
     /// <summary>
     /// Gets the current number of history entries.
@@ -112,5 +121,65 @@ public sealed class History
         if (index < 1 || index > _entries.Count)
             return null;
         return _entries[index - 1];
+    }
+
+    /// <summary>
+    /// Loads history entries from the persistent history file.
+    /// Existing in-memory entries are replaced.
+    /// </summary>
+    public void Load()
+    {
+        try
+        {
+            if (!File.Exists(FilePath))
+                return;
+
+            var lines = File.ReadAllLines(FilePath);
+            _entries.Clear();
+
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                // Handle legacy timestamp lines (lines starting with #)
+                if (line.StartsWith('#'))
+                    continue;
+
+                _entries.Add(line);
+
+                if (_entries.Count >= MaxEntries)
+                    break;
+            }
+
+            _navigationIndex = _entries.Count;
+        }
+        catch
+        {
+            // If we can't load history, just continue with empty history
+        }
+    }
+
+    /// <summary>
+    /// Saves history entries to the persistent history file.
+    /// Only the most recent <see cref="MaxEntries"/> entries are saved.
+    /// </summary>
+    public void Save()
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(FilePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var entriesToSave = _entries.TakeLast(MaxEntries).ToList();
+            File.WriteAllLines(FilePath, entriesToSave);
+        }
+        catch
+        {
+            // If we can't save history, silently continue
+        }
     }
 }
