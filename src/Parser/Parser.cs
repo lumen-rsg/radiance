@@ -85,7 +85,6 @@ public sealed class Parser
             // If terminators are specified and the next meaningful token is a terminator keyword, stop
             if (terminators is not null)
             {
-                var savedPos = _pos;
                 separators.Add(separatorType);
                 Advance(); // consume the separator
                 SkipCommentsAndNewlines();
@@ -93,36 +92,17 @@ public sealed class Parser
                 if (IsAtEnd())
                     break;
 
-                if (terminators is not null && IsKeywordToken(out var kw) && IsTerminator(kw!, terminators))
+                // If the next token is a terminator keyword, the separator we just
+                // consumed belongs to this list (e.g., `true; then` in `if true; then`).
+                // Stop here — the caller will consume the terminator keyword.
+                if (IsKeywordToken(out var kw) && IsTerminator(kw!, terminators))
                 {
-                    // The separator belongs to the outer construct, not this list.
-                    // Remove the separator we just added and restore position.
-                    separators.RemoveAt(separators.Count - 1);
-                    _pos = savedPos;
                     break;
                 }
 
                 // A trailing separator doesn't start a new pipeline
                 if (IsAtEnd() || IsListSeparatorPeek())
-                {
-                    // Check if the separator after this is really a terminator boundary
-                    if (terminators is not null && PeekNextKeyword() is not null &&
-                        IsTerminator(PeekNextKeyword()!, terminators))
-                    {
-                        separators.RemoveAt(separators.Count - 1);
-                        _pos = savedPos;
-                        break;
-                    }
                     break;
-                }
-
-                // Check if the next command starts with a terminator keyword
-                if (IsKeywordToken(out var kw2) && IsTerminator(kw2!, terminators!))
-                {
-                    // This keyword terminates the list; don't consume it
-                    // The separator we consumed was part of the flow, keep it
-                    break;
-                }
 
                 pipelines.Add(ParseAndOr(terminators));
             }
@@ -676,10 +656,16 @@ public sealed class Parser
             assignments.Add(new AssignmentNode(name, value));
         }
 
-        // Collect command words — stop at operators, keywords in command position, etc.
-        while (IsWordToken() && !IsKeywordInCommandPosition())
+        // Collect command words — includes AssignmentWord tokens after command name
+        // (e.g., alias name=value, export VAR=val). Stop at operators and keywords
+        // in command position (only when no words collected yet).
+        while (IsWordToken() || Current().Type == TokenType.AssignmentWord)
         {
-            var wordParts = CollectWordParts();
+            // Keywords only terminate when in command position (no words yet)
+            if (words.Count == 0 && IsKeywordInCommandPosition())
+                break;
+            
+            var wordParts = CollectWordOrAssignmentParts();
             words.Add(wordParts);
         }
 
@@ -717,6 +703,25 @@ public sealed class Parser
         // These keywords terminate simple commands when they appear as the first word
         return Current().Value is "then" or "fi" or "elif" or "else"
             or "do" or "done" or "esac";
+    }
+
+    /// <summary>
+    /// Collects word parts from either regular word tokens or AssignmentWord tokens.
+    /// AssignmentWord tokens are treated as a single unquoted word part.
+    /// </summary>
+    private List<WordPart> CollectWordOrAssignmentParts()
+    {
+        var wordParts = new List<WordPart>();
+
+        // Handle AssignmentWord token as a single word part
+        if (Current().Type == TokenType.AssignmentWord)
+        {
+            wordParts.Add(new WordPart(Advance().Value, WordQuoting.None));
+            return wordParts;
+        }
+
+        // Otherwise, use the regular word parts collector
+        return CollectWordParts();
     }
 
     /// <summary>

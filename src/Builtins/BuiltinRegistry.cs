@@ -72,7 +72,9 @@ public sealed class BuiltinRegistry
         registry.Register(new ExitCommand());
         registry.Register(new ExportCommand());
         registry.Register(new UnsetCommand());
-        registry.Register(new TypeCommand());
+        var typeCmd = new TypeCommand();
+        typeCmd.SetRegistry(registry);
+        registry.Register(typeCmd);
         registry.Register(new SetCommand());
         registry.Register(new EnvCommand());
         registry.Register(new TrueCommand());

@@ -314,10 +314,53 @@ public sealed class Lexer
                 continue;
             }
 
+            // Braced variable expansion: ${VAR}
+            if (_source[_pos] == '$' && _pos + 1 < _source.Length && _source[_pos + 1] == '{')
+            {
+                ReadBracedVariable(sb);
+                continue;
+            }
+
             // Backtick command substitution: `...`
             if (_source[_pos] == '`')
             {
                 ReadBacktickSubstitution(sb);
+                continue;
+            }
+
+            // Single quote inside word — read quoted content as part of this word
+            if (_source[_pos] == '\'')
+            {
+                Advance(); // skip opening '
+                while (_pos < _source.Length && _source[_pos] != '\'')
+                {
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+                if (_pos < _source.Length) Advance(); // skip closing '
+                continue;
+            }
+
+            // Double quote inside word — read quoted content as part of this word
+            if (_source[_pos] == '"')
+            {
+                Advance(); // skip opening "
+                while (_pos < _source.Length && _source[_pos] != '"')
+                {
+                    if (_source[_pos] == '\\' && _pos + 1 < _source.Length)
+                    {
+                        var next = _source[_pos + 1];
+                        if (next is '"' or '\\' or '$' or '`')
+                        {
+                            sb.Append(next);
+                            Advance(); Advance();
+                            continue;
+                        }
+                    }
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+                if (_pos < _source.Length) Advance(); // skip closing "
                 continue;
             }
 
@@ -447,10 +490,39 @@ public sealed class Lexer
     }
 
     /// <summary>
+    /// Reads a braced variable expansion <c>${...}</c>, tracking brace nesting.
+    /// Appends the full expansion (including delimiters) to the StringBuilder.
+    /// </summary>
+    private void ReadBracedVariable(StringBuilder sb)
+    {
+        sb.Append(_source[_pos]); // $
+        Advance();
+        sb.Append(_source[_pos]); // {
+        Advance();
+
+        var depth = 1;
+
+        while (_pos < _source.Length && depth > 0)
+        {
+            if (_source[_pos] == '{')
+            {
+                depth++;
+            }
+            else if (_source[_pos] == '}')
+            {
+                depth--;
+            }
+
+            sb.Append(_source[_pos]);
+            Advance();
+        }
+    }
+
+    /// <summary>
     /// Checks whether a character terminates an unquoted word.
     /// </summary>
     private static bool IsWordTerminator(char c) =>
-        char.IsWhiteSpace(c) || c is '|' or '&' or ';' or '>' or '<' or '(' or ')' or '{' or '}' or '\'' or '"' or '\n' or '#';
+        char.IsWhiteSpace(c) || c is '|' or '&' or ';' or '>' or '<' or '(' or ')' or '{' or '}' or '\n' or '#';
 
     /// <summary>
     /// Determines if the word value looks like an assignment (e.g. VAR=value).

@@ -121,7 +121,12 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             else
             {
                 exitCode = node.Pipelines[i].Accept(this);
+                _context.LastExitCode = exitCode;
             }
+
+            // Check if break, continue, or return was requested — stop executing the list
+            if (_context.BreakRequested || _context.ReturnRequested || _context.ContinueRequested)
+                break;
         }
 
         return exitCode;
@@ -200,10 +205,29 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         }
 
         var commandName = expandedWords[0];
+
+        // Try alias expansion (BASH order: alias → function → builtin → external)
+        var alias = _context.GetAlias(commandName);
+        if (alias is not null)
+        {
+            // Re-parse the alias expansion with the remaining arguments
+            var remaining = expandedWords.Count > 1
+                ? " " + string.Join(" ", expandedWords.Skip(1))
+                : "";
+            var fullCommand = alias + remaining;
+
+            var aliasLexer = new Lexer.Lexer(fullCommand);
+            var aliasTokens = aliasLexer.Tokenize();
+            var aliasParser = new Parser.Parser(aliasTokens);
+            var aliasAst = aliasParser.Parse();
+
+            if (aliasAst is not null)
+                return Execute(aliasAst);
+        }
+
         var args = expandedWords.ToArray();
 
-        // Try function first (BASH order: function → builtin → external)
-        // (Alias expansion happens at the parser/expander level)
+        // Try function (BASH order: function → builtin → external)
         if (_context.HasFunction(commandName))
         {
             return ExecuteFunction(commandName, expandedWords);
@@ -418,18 +442,17 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// </remarks>
     public int VisitCase(CaseNode node)
     {
-        // Expand the word to match
-        var word = string.Concat(node.Word.Select(p => _expander.ExpandWord(new List<WordPart> { p })));
-        // Actually, expand the whole word as a single unit
+        // Expand the word to match (with glob expansion for the subject)
         var expandedWord = _expander.ExpandWord(node.Word);
         var wordToMatch = expandedWord.Count > 0 ? expandedWord[0] : string.Empty;
 
         foreach (var item in node.Items)
         {
             // Check each pattern in the case item
+            // Skip glob expansion for patterns — they are used for matching, not filenames
             foreach (var patternParts in item.Patterns)
             {
-                var expandedPattern = _expander.ExpandWord(patternParts);
+                var expandedPattern = _expander.ExpandWord(patternParts, skipGlob: true);
                 if (expandedPattern.Count == 0)
                     continue;
 
@@ -548,8 +571,9 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         // Push a new variable scope for the function
         _context.PushScope();
 
-        // Set positional parameters (args[0] is function name, args[1..] are the params)
-        var funcArgs = new List<string> { name };
+        // Set positional parameters — only the arguments, NOT the function name.
+        // In BASH: $1 = first arg, $2 = second arg, etc.
+        var funcArgs = new List<string>();
         for (var i = 1; i < args.Count; i++)
             funcArgs.Add(args[i]);
 

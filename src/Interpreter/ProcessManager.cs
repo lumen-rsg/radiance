@@ -79,7 +79,8 @@ public sealed class ProcessManager
         ShellContext context,
         Stream? stdinStream = null,
         Stream? stdoutStream = null,
-        Stream? stderrStream = null)
+        Stream? stderrStream = null,
+        bool wireStdoutAsync = true)
     {
         var resolved = ResolveCommand(commandName);
         if (resolved is null)
@@ -108,17 +109,10 @@ public sealed class ProcessManager
                 startInfo.EnvironmentVariables[name] = value;
             }
 
-            // Configure stdin
-            if (stdinStream is not null)
-            {
-                startInfo.RedirectStandardInput = true;
-            }
-            else
-            {
-                startInfo.RedirectStandardInput = true;
-            }
+            // Always redirect stdin so we can close it
+            startInfo.RedirectStandardInput = true;
 
-            // Configure stdout
+            // Configure stdout — redirect when there's a stream or we're in a pipeline
             startInfo.RedirectStandardOutput = stdoutStream is not null || stdinStream is not null;
 
             // Configure stderr
@@ -128,8 +122,15 @@ public sealed class ProcessManager
 
             process.Start();
 
-            // Wire up stdin from the provided stream (async copy)
-            if (stdinStream is not null)
+            // Wire up stdin
+            if (stdinStream is MemoryStream ms)
+            {
+                // MemoryStream data is already available — copy synchronously to avoid race conditions
+                process.StandardInput.BaseStream.Write(ms.ToArray(), 0, (int)ms.Length);
+                process.StandardInput.BaseStream.Flush();
+                process.StandardInput.Close();
+            }
+            else if (stdinStream is not null)
             {
                 _ = CopyStreamToWriterAsync(stdinStream, process.StandardInput.BaseStream);
             }
@@ -139,22 +140,27 @@ public sealed class ProcessManager
             }
 
             // Wire up stdout
-            if (stdoutStream is not null)
+            if (stdoutStream is MemoryStream)
+            {
+                // MemoryStream — copy synchronously so all data is available when we return
+                try
+                {
+                    process.StandardOutput.BaseStream.CopyTo(stdoutStream);
+                }
+                catch (IOException) { /* broken pipe */ }
+                catch (ObjectDisposedException) { /* disposed */ }
+            }
+            else if (stdoutStream is not null)
             {
                 _ = CopyReaderToStreamAsync(process.StandardOutput.BaseStream, stdoutStream);
             }
-            else if (stdinStream is not null)
+            else if (!wireStdoutAsync)
             {
-                // In a pipeline but stdout not redirected — let it go to console
-                process.BeginOutputReadLine();
-                process.OutputDataReceived += (_, e) =>
-                {
-                    if (e.Data is not null)
-                        Console.WriteLine(e.Data);
-                };
+                // Caller will read stdout synchronously — don't wire up async events
             }
             else
             {
+                // Let stdout go to console via async events
                 process.BeginOutputReadLine();
                 process.OutputDataReceived += (_, e) =>
                 {

@@ -44,7 +44,7 @@ public sealed class Expander
     /// </summary>
     /// <param name="parts">The word parts composing a single shell word.</param>
     /// <returns>A list of expanded strings (typically one, but glob can produce multiple).</returns>
-    public List<string> ExpandWord(List<WordPart> parts)
+    public List<string> ExpandWord(List<WordPart> parts, bool skipGlob = false)
     {
         if (parts.Count == 0)
             return [""];
@@ -66,7 +66,7 @@ public sealed class Expander
             }
 
             // Track if any unquoted part has glob characters
-            if (part.Quoting == WordQuoting.None && GlobExpander.ContainsGlobChars(expanded))
+            if (!skipGlob && part.Quoting == WordQuoting.None && GlobExpander.ContainsGlobChars(expanded))
             {
                 hasGlobChars = true;
             }

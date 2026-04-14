@@ -171,224 +171,179 @@ public sealed class PipelineExecutor
     }
 
     /// <summary>
-    /// Executes a multi-command pipeline using anonymous pipes to connect processes.
-    /// Supports simple commands, compound commands, and builtins.
+    /// Executes a multi-command pipeline by running each stage sequentially and
+    /// passing data through MemoryStreams. Simple, reliable approach that avoids
+    /// anonymous pipe race conditions.
     /// </summary>
     private int ExecutePipeline(List<AstNode> commands)
     {
         var processCount = commands.Count;
-        var processes = new Process?[processCount];
-        var pipePairs = new (AnonymousPipeServerStream writer, AnonymousPipeClientStream reader)?[processCount - 1];
-        var builtinResults = new (bool isBuiltin, int exitCode, string? capturedOutput)[processCount];
-        var redirectFiles = new List<Stream>();
+        var lastExitCode = 0;
+        byte[]? pipeData = null; // carries stdout from one stage to the next stage's stdin
 
-        try
+        for (var i = 0; i < processCount; i++)
         {
-            // 1. Create anonymous pipe pairs between each pair of adjacent commands
-            for (var i = 0; i < processCount - 1; i++)
+            var cmd = commands[i];
+
+            // ── Determine stdin for this stage ──
+            Stream? stdinStream = null;
+            if (i == 0 && cmd is SimpleCommandNode sc0)
             {
-                var writer = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable);
-                var reader = new AnonymousPipeClientStream(PipeDirection.In, writer.GetClientHandleAsString());
-                pipePairs[i] = (writer, reader);
+                var stdinFile = GetStdinRedirect(sc0);
+                if (stdinFile is not null)
+                    stdinStream = new FileStream(stdinFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+            }
+            else if (pipeData is not null && pipeData.Length > 0)
+            {
+                stdinStream = new MemoryStream(pipeData);
             }
 
-            // 2. Start all processes / execute builtins / execute compound commands
-            for (var i = 0; i < processCount; i++)
+            // ── Determine stdout for this stage ──
+            var isLast = i == processCount - 1;
+            Stream? stdoutFile = null;
+            if (isLast && cmd is SimpleCommandNode scN)
             {
-                var cmd = commands[i];
-
-                // Determine stdin stream for this command
-                Stream? stdinStream = null;
-                if (i == 0)
+                var stdoutRedirect = GetStdoutRedirect(scN);
+                if (stdoutRedirect is not null)
                 {
-                    // First command: check for file redirect (only for simple commands)
-                    if (cmd is SimpleCommandNode simpleCmd0)
-                    {
-                        var stdinFile = GetStdinRedirect(simpleCmd0);
-                        if (stdinFile is not null)
-                        {
-                            stdinStream = new FileStream(stdinFile, FileMode.Open, FileAccess.Read, FileShare.Read);
-                            redirectFiles.Add(stdinStream);
-                        }
-                    }
+                    var (file, append) = stdoutRedirect.Value;
+                    stdoutFile = new FileStream(file, append ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None);
+                }
+            }
+
+            // ── Execute the stage ──
+            if (cmd is not SimpleCommandNode)
+            {
+                // Compound command (if, for, while, case)
+                var captured = new StringWriter();
+                var origOut = Console.Out;
+                try
+                {
+                    Console.SetOut(captured);
+                    lastExitCode = _interpreter.Execute(cmd);
+                }
+                finally
+                {
+                    Console.SetOut(origOut);
+                }
+
+                var output = captured.ToString();
+                if (stdoutFile is not null)
+                {
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(output);
+                    stdoutFile.Write(bytes, 0, bytes.Length);
+                    pipeData = null;
+                }
+                else if (isLast)
+                {
+                    Console.Write(output);
+                    pipeData = null;
                 }
                 else
                 {
-                    // Read from the previous pipe
-                    stdinStream = pipePairs[i - 1]!.Value.reader;
+                    pipeData = System.Text.Encoding.UTF8.GetBytes(output);
                 }
-
-                // Determine stdout stream for this command
-                Stream? stdoutStream = null;
-                if (i == processCount - 1)
-                {
-                    // Last command: check for file redirect (only for simple commands)
-                    if (cmd is SimpleCommandNode simpleCmdN)
-                    {
-                        var stdoutRedirect = GetStdoutRedirect(simpleCmdN);
-                        if (stdoutRedirect is not null)
-                        {
-                            var (file, append) = stdoutRedirect.Value;
-                            stdoutStream = new FileStream(
-                                file,
-                                append ? FileMode.Append : FileMode.Create,
-                                FileAccess.Write,
-                                FileShare.None);
-                            redirectFiles.Add(stdoutStream);
-                        }
-                    }
-                }
-                else
-                {
-                    // Write to the next pipe
-                    stdoutStream = pipePairs[i]!.Value.writer;
-                }
-
-                // Handle compound commands (if, for, while, case) — capture output like builtins
-                if (cmd is not SimpleCommandNode)
-                {
-                    var capturedOutput = new StringWriter();
-                    var originalOut = Console.Out;
-                    try
-                    {
-                        Console.SetOut(capturedOutput);
-                        var exitCode = _interpreter.Execute(cmd);
-                        builtinResults[i] = (true, exitCode, capturedOutput.ToString());
-                    }
-                    finally
-                    {
-                        Console.SetOut(originalOut);
-                    }
-
-                    // Write captured output to the stdout stream (pipe or file)
-                    if (stdoutStream is not null && builtinResults[i].capturedOutput is not null)
-                    {
-                        var bytes = System.Text.Encoding.UTF8.GetBytes(builtinResults[i].capturedOutput!);
-                        stdoutStream.Write(bytes, 0, bytes.Length);
-                        stdoutStream.Flush();
-                    }
-
-                    // Close stdin if it came from a pipe
-                    if (i > 0) stdinStream?.Close();
-                    // Close stdout writer so next process gets EOF
-                    if (i < processCount - 1 && stdoutStream is not null) stdoutStream.Close();
-                    else if (stdoutStream is not null) stdoutStream.Flush();
-
-                    continue;
-                }
-
-                // Simple command path
+            }
+            else
+            {
                 var simpleCommand = (SimpleCommandNode)cmd;
                 var expandedWords = ExpandWords(simpleCommand);
 
                 if (expandedWords.Count == 0)
                 {
-                    builtinResults[i] = (true, 0, null);
+                    lastExitCode = 0;
+                    pipeData = null;
+                    stdinStream?.Dispose();
+                    stdoutFile?.Dispose();
                     continue;
                 }
 
                 var commandName = expandedWords[0];
 
-                // Execute as builtin or external process
                 if (_builtins.IsBuiltin(commandName))
                 {
-                    // Capture builtin output
-                    var capturedOutput = new StringWriter();
-                    var originalOut = Console.Out;
+                    // Builtin — capture output via Console.SetOut
+                    var captured = new StringWriter();
+                    var origOut = Console.Out;
                     try
                     {
-                        Console.SetOut(capturedOutput);
-                        _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out var exitCode);
-                        builtinResults[i] = (true, exitCode, capturedOutput.ToString());
+                        Console.SetOut(captured);
+                        _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out lastExitCode);
                     }
                     finally
                     {
-                        Console.SetOut(originalOut);
+                        Console.SetOut(origOut);
                     }
 
-                    // Write captured output to the stdout stream (pipe or file)
-                    if (stdoutStream is not null && builtinResults[i].capturedOutput is not null)
+                    var output = captured.ToString();
+                    if (stdoutFile is not null)
                     {
-                        var bytes = System.Text.Encoding.UTF8.GetBytes(builtinResults[i].capturedOutput!);
-                        stdoutStream.Write(bytes, 0, bytes.Length);
-                        stdoutStream.Flush();
+                        var bytes = System.Text.Encoding.UTF8.GetBytes(output);
+                        stdoutFile.Write(bytes, 0, bytes.Length);
+                        pipeData = null;
                     }
-
-                    if (i > 0) stdinStream?.Close();
-                    if (i < processCount - 1 && stdoutStream is not null) stdoutStream.Close();
-                    else if (stdoutStream is not null) stdoutStream.Flush();
+                    else if (isLast)
+                    {
+                        Console.Write(output);
+                        pipeData = null;
+                    }
+                    else
+                    {
+                        pipeData = System.Text.Encoding.UTF8.GetBytes(output);
+                    }
                 }
                 else
                 {
-                    // External command
+                    // External command — run the process, capture stdout to byte[]
+                    var capturedMs = new MemoryStream();
                     var process = _processManager.StartProcess(
                         commandName,
                         expandedWords.ToArray(),
                         _context,
                         stdinStream,
-                        stdoutStream);
+                        isLast && stdoutFile is not null ? stdoutFile : capturedMs,
+                        wireStdoutAsync: false);
 
                     if (process is null)
                     {
                         Console.Error.WriteLine($"radiance: command not found: {commandName}");
-                        builtinResults[i] = (true, 127, null);
+                        lastExitCode = 127;
+                        pipeData = null;
                     }
                     else
                     {
-                        processes[i] = process;
+                        process.WaitForExit();
+                        lastExitCode = process.ExitCode;
+
+                        if (stdoutFile is not null)
+                        {
+                            // Output was written directly to file
+                            pipeData = null;
+                        }
+                        else if (isLast)
+                        {
+                            // Last command — write captured stdout to console
+                            var output = System.Text.Encoding.UTF8.GetString(capturedMs.ToArray());
+                            if (!string.IsNullOrEmpty(output))
+                                Console.Write(output);
+                            pipeData = null;
+                        }
+                        else
+                        {
+                            // Intermediate — pass stdout bytes to next stage
+                            pipeData = capturedMs.ToArray();
+                        }
+
+                        process.Dispose();
                     }
-
-                    // Close our copy of the pipe handles
-                    if (i > 0) stdinStream?.Close();
-                    if (i < processCount - 1) stdoutStream?.Close();
-                    else if (stdoutStream is not null) stdoutStream.Close();
                 }
             }
 
-            // 3. Wait for all external processes to complete (in reverse order)
-            for (var i = processCount - 1; i >= 0; i--)
-            {
-                processes[i]?.WaitForExit();
-            }
-
-            // 4. Determine exit code — last command's exit code
-            var lastIdx = processCount - 1;
-            var finalExitCode = 0;
-
-            if (processes[lastIdx] is not null)
-            {
-                finalExitCode = processes[lastIdx]!.ExitCode;
-            }
-            else if (builtinResults[lastIdx].isBuiltin)
-            {
-                finalExitCode = builtinResults[lastIdx].exitCode;
-            }
-
-            return finalExitCode;
+            stdinStream?.Dispose();
+            stdoutFile?.Dispose();
         }
-        finally
-        {
-            // Cleanup all pipe handles and redirect files
-            foreach (var pipePair in pipePairs)
-            {
-                if (pipePair is not null)
-                {
-                    try { pipePair.Value.writer.Dispose(); } catch { /* ignored */ }
-                    try { pipePair.Value.reader.Dispose(); } catch { /* ignored */ }
-                }
-            }
 
-            foreach (var stream in redirectFiles)
-            {
-                try { stream.Dispose(); } catch { /* ignored */ }
-            }
-
-            // Dispose processes
-            foreach (var process in processes)
-            {
-                try { process?.Dispose(); } catch { /* ignored */ }
-            }
-        }
+        return lastExitCode;
     }
 
     /// <summary>
