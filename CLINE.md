@@ -22,6 +22,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | **AST** | `src/Parser/Ast/` | Abstract Syntax Tree node definitions |
 | **Interpreter** | `src/Interpreter/` | AST walker that executes commands |
 | **Built-ins** | `src/Builtins/` | Built-in shell commands (echo, cd, pwd, export, etc.) |
+| **Plugins** | `src/Plugins/` | Plugin interface, manager, context, and `plugin` builtin |
 | **Expansion** | `src/Expansion/` | Variable, glob, tilde, brace, and command substitution |
 | **Utils** | `src/Utils/` | Path resolution, signal handling, helpers |
 
@@ -75,6 +76,11 @@ Radiance/
 │   │   ├── IBuiltinCommand.cs     # Builtin command interface
 │   │   ├── BuiltinRegistry.cs     # Command registry
 │   │   └── *.cs                   # Individual builtin commands
+│   ├── Plugins/
+│   │   ├── IRadiancePlugin.cs     # Plugin interface
+│   │   ├── PluginContext.cs       # Plugin API surface (register commands, access shell)
+│   │   ├── PluginManager.cs       # Plugin discovery, loading, and lifecycle
+│   │   └── PluginCommand.cs       # `plugin` builtin command
 │   ├── Expansion/
 │   │   └── *.cs                   # Variable, glob, tilde, brace expansion
 │   └── Utils/
@@ -87,6 +93,49 @@ Radiance/
 ```
 
 ## Changelog
+
+### [1.1.0] — Plugin System ✅
+
+**Added:**
+
+**Plugin System (`src/Plugins/`):**
+- `IRadiancePlugin` interface — contract for plugins with `Name`, `Version`, `Description`, `OnLoad()`, `OnUnload()` lifecycle methods
+- `PluginContext` — safe API surface passed to plugins on load:
+  - `RegisterCommand(IBuiltinCommand)` — register custom commands that become available as builtins
+  - `UnregisterCommand(string)` — remove a previously registered command
+  - `Shell` property — access to `ShellContext` for reading/writing variables, setting aliases, etc.
+  - Tracks all registered commands per-plugin for automatic cleanup on unload
+- `PluginManager` — discovers, loads, and manages plugin lifecycle:
+  - Scans `~/.radiance/plugins/` for `.dll` files on startup (creates directory if missing)
+  - Uses `Assembly.LoadFrom()` + reflection to find `IRadiancePlugin` implementations
+  - Supports runtime loading via `plugin load <path>` and unloading via `plugin unload <name>`
+  - `UnloadAll()` called on shell exit for clean shutdown
+  - Prevents duplicate plugin loading (by name)
+  - Rollback of registered commands if `OnLoad()` fails
+- `PluginCommand` — `plugin` builtin command for managing plugins at runtime:
+  - `plugin list` — display all loaded plugins with name, version, description
+  - `plugin load <path>` — load a plugin DLL at runtime
+  - `plugin unload <name>` — unload a plugin by name (removes its commands)
+  - `plugin help` — usage information
+
+**Registry Extension:**
+- Added `BuiltinRegistry.Unregister(string)` — removes a registered command by name, used by plugin cleanup
+
+**Shell Integration (`RadianceShell`):**
+- `PluginManager` initialized in constructor alongside `BuiltinRegistry`
+- `LoadPlugins()` called after config sourcing, before welcome banner
+- `UnloadAll()` called on exit after history save
+- Plugin count displayed on startup if any plugins loaded
+
+**New files:**
+- `src/Plugins/IRadiancePlugin.cs`
+- `src/Plugins/PluginContext.cs`
+- `src/Plugins/PluginManager.cs`
+- `src/Plugins/PluginCommand.cs`
+
+**Modified files:**
+- `src/Builtins/BuiltinRegistry.cs` — added `Unregister()` method
+- `src/Shell/RadianceShell.cs` — plugin manager initialization, loading, and unloading
 
 ### [1.0.1] — Tab Completion Fix & QoL ✅
 

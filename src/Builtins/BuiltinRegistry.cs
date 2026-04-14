@@ -60,6 +60,14 @@ public sealed class BuiltinRegistry
         _commands.TryGetValue(name, out var cmd) ? cmd : null;
 
     /// <summary>
+    /// Unregisters a built-in command by name.
+    /// Used by the plugin system to remove commands when a plugin is unloaded.
+    /// </summary>
+    /// <param name="name">The command name to unregister.</param>
+    /// <returns>True if the command was found and removed, false otherwise.</returns>
+    public bool Unregister(string name) => _commands.Remove(name);
+
+    /// <summary>
     /// Creates a new registry pre-loaded with all standard built-in commands.
     /// </summary>
     /// <returns>A fully populated <see cref="BuiltinRegistry"/>.</returns>

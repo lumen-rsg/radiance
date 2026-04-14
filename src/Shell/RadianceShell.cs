@@ -3,6 +3,7 @@ using Radiance.Builtins;
 using Radiance.Interpreter;
 using Radiance.Lexer;
 using Radiance.Parser;
+using Radiance.Plugins;
 using Radiance.Utils;
 
 namespace Radiance.Shell;
@@ -23,6 +24,7 @@ public sealed class RadianceShell
     private readonly ProcessManager _processManager;
     private readonly ShellInterpreter _interpreter;
     private readonly History _history;
+    private readonly PluginManager _pluginManager;
     private bool _running = true;
 
     /// <summary>
@@ -83,6 +85,11 @@ public sealed class RadianceShell
 
         // Wire up the script executor callback for the source builtin
         _context.ScriptExecutor = ExecuteInContext;
+
+        // Initialize plugin system
+        _pluginManager = new PluginManager(_context, _builtins);
+        var pluginCmd = new PluginCommand { Manager = _pluginManager };
+        _builtins.Register(pluginCmd);
     }
 
     /// <summary>
@@ -97,6 +104,9 @@ public sealed class RadianceShell
 
         // Source user config if it exists
         SourceConfig();
+
+        // Load plugins from ~/.radiance/plugins/
+        LoadPlugins();
 
         PrintWelcome();
 
@@ -130,6 +140,9 @@ public sealed class RadianceShell
 
         // Save persistent history on exit
         _history.Save();
+
+        // Unload all plugins on exit
+        _pluginManager.UnloadAll();
 
         return _context.LastExitCode;
     }
@@ -302,6 +315,26 @@ public sealed class RadianceShell
         catch
         {
             // Config file is optional — ignore errors
+        }
+    }
+
+    /// <summary>
+    /// Loads plugins from the default plugin directory.
+    /// </summary>
+    private void LoadPlugins()
+    {
+        try
+        {
+            _pluginManager.LoadAll();
+
+            if (_pluginManager.LoadedCount > 0)
+            {
+                ColorOutput.WriteInfo($"Loaded {_pluginManager.LoadedCount} plugin(s)");
+            }
+        }
+        catch (Exception ex)
+        {
+            ColorOutput.WriteWarning($"plugins: {ex.Message}");
         }
     }
 
