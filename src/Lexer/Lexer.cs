@@ -178,6 +178,20 @@ public sealed class Lexer
             return token;
         }
 
+        if (c == '{')
+        {
+            var token = MakeToken(TokenType.LBrace, "{");
+            Advance();
+            return token;
+        }
+
+        if (c == '}')
+        {
+            var token = MakeToken(TokenType.RBrace, "}");
+            Advance();
+            return token;
+        }
+
         // Word — unquoted sequence of non-special characters
         return ReadWord();
     }
@@ -434,7 +448,7 @@ public sealed class Lexer
     /// Checks whether a character terminates an unquoted word.
     /// </summary>
     private static bool IsWordTerminator(char c) =>
-        char.IsWhiteSpace(c) || c is '|' or '&' or ';' or '>' or '<' or '(' or ')' or '\'' or '"' or '\n' or '#';
+        char.IsWhiteSpace(c) || c is '|' or '&' or ';' or '>' or '<' or '(' or ')' or '{' or '}' or '\'' or '"' or '\n' or '#';
 
     /// <summary>
     /// Determines if the word value looks like an assignment (e.g. VAR=value).

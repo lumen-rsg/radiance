@@ -37,7 +37,8 @@ public sealed class Parser
         "if", "then", "elif", "else", "fi",
         "for", "in", "do", "done",
         "while", "until",
-        "case", "esac"
+        "case", "esac",
+        "function"
     };
 
     /// <summary>
@@ -173,8 +174,8 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// Parses a single command: either a simple command or a compound command.
-    /// Dispatches based on the first keyword.
+    /// Parses a single command: either a simple command, a compound command, or a function definition.
+    /// Dispatches based on the first keyword or pattern.
     /// </summary>
     /// <param name="terminators">Optional keyword terminators for compound list parsing.</param>
     private AstNode ParseCommand(string[]? terminators = null)
@@ -196,6 +197,14 @@ public sealed class Parser
                     return ParseWhile(isUntil: true);
                 case "case":
                     return ParseCase();
+                case "function":
+                    return ParseFunction();
+            }
+
+            // Check for name() { ... } pattern — word followed by ( )
+            if (Current().Type == TokenType.Word && Lookahead(1)?.Type == TokenType.LParen && Lookahead(2)?.Type == TokenType.RParen)
+            {
+                return ParseFunctionNameParens();
             }
         }
 
@@ -448,6 +457,198 @@ public sealed class Parser
         }
 
         return parts;
+    }
+
+    // ──── Function Parsers ────
+
+    /// <summary>
+    /// Parses a function definition using the 'function' keyword syntax.
+    /// BASH syntax: <c>function name { body; }</c>
+    /// </summary>
+    private FunctionNode ParseFunction()
+    {
+        ExpectKeyword("function");
+        SkipCommentsAndNewlines();
+
+        // Get the function name
+        if (Current().Type != TokenType.Word)
+        {
+            ReportError($"expected function name after 'function', got {Current().Type}");
+            return new FunctionNode();
+        }
+
+        var name = Advance().Value;
+        SkipCommentsAndNewlines();
+
+        // Optional () after function name (BASH allows both 'function name' and 'function name()')
+        if (Current().Type == TokenType.LParen)
+        {
+            Advance(); // (
+            if (Current().Type == TokenType.RParen)
+                Advance(); // )
+            SkipCommentsAndNewlines();
+        }
+
+        // Expect {
+        if (Current().Type != TokenType.LBrace)
+        {
+            ReportError($"expected '{{' after function name, got '{Current().Value}' ({Current().Type})");
+            return new FunctionNode();
+        }
+
+        Advance(); // {
+        SkipCommentsAndNewlines();
+
+        // Parse function body (stops at })
+        var body = ParseBraceBody();
+
+        // Expect }
+        if (Current().Type == TokenType.RBrace)
+        {
+            Advance();
+        }
+        else
+        {
+            ReportError($"expected '}}' to close function body, got '{Current().Value}' ({Current().Type})");
+        }
+
+        return new FunctionNode { Name = name, Body = body };
+    }
+
+    /// <summary>
+    /// Parses a function definition using the name() syntax.
+    /// BASH syntax: <c>name() { body; }</c>
+    /// </summary>
+    private FunctionNode ParseFunctionNameParens()
+    {
+        // Consume function name
+        var name = Advance().Value;
+
+        // Consume ( )
+        Advance(); // (
+        Advance(); // )
+        SkipCommentsAndNewlines();
+
+        // Expect {
+        if (Current().Type != TokenType.LBrace)
+        {
+            ReportError($"expected '{{' after '()', got '{Current().Value}' ({Current().Type})");
+            return new FunctionNode();
+        }
+
+        Advance(); // {
+        SkipCommentsAndNewlines();
+
+        // Parse function body (stops at })
+        var body = ParseBraceBody();
+
+        // Expect }
+        if (Current().Type == TokenType.RBrace)
+        {
+            Advance();
+        }
+        else
+        {
+            ReportError($"expected '}}' to close function body, got '{Current().Value}' ({Current().Type})");
+        }
+
+        return new FunctionNode { Name = name, Body = body };
+    }
+
+    /// <summary>
+    /// Parses a brace-enclosed body, stopping when } is encountered.
+    /// Similar to <see cref="ParseCompoundList"/> but uses brace tokens as delimiters.
+    /// </summary>
+    private ListNode ParseBraceBody()
+    {
+        var pipelines = new List<PipelineNode>();
+        var separators = new List<TokenType>();
+
+        SkipCommentsAndNewlines();
+
+        // If we immediately hit }, return an empty body
+        if (Current().Type == TokenType.RBrace)
+            return new ListNode();
+
+        // Parse pipelines until we hit }
+        pipelines.Add(ParseAndOrForBraceBody());
+
+        while (IsListSeparator(out var separatorType))
+        {
+            separators.Add(separatorType);
+            Advance(); // consume separator
+            SkipCommentsAndNewlines();
+
+            // Check for closing brace
+            if (Current().Type == TokenType.RBrace || IsAtEnd())
+                break;
+
+            pipelines.Add(ParseAndOrForBraceBody());
+        }
+
+        return new ListNode { Pipelines = pipelines, Separators = separators };
+    }
+
+    /// <summary>
+    /// Parses an and_or expression inside a brace body.
+    /// Stops at } similarly to how compound list stops at terminator keywords.
+    /// </summary>
+    private PipelineNode ParseAndOrForBraceBody()
+    {
+        return ParsePipelineForBraceBody();
+    }
+
+    /// <summary>
+    /// Parses a pipeline inside a brace body.
+    /// </summary>
+    private PipelineNode ParsePipelineForBraceBody()
+    {
+        var commands = new List<AstNode> { ParseCommandForBraceBody() };
+
+        while (Current().Type == TokenType.Pipe)
+        {
+            Advance();
+            SkipCommentsAndNewlines();
+            commands.Add(ParseCommandForBraceBody());
+        }
+
+        return new PipelineNode { Commands = commands };
+    }
+
+    /// <summary>
+    /// Parses a single command inside a brace body.
+    /// Checks for function definitions as well as compound/simple commands.
+    /// </summary>
+    private AstNode ParseCommandForBraceBody()
+    {
+        SkipCommentsAndNewlines();
+
+        if (Current().Type == TokenType.Word)
+        {
+            switch (Current().Value)
+            {
+                case "if":
+                    return ParseIf();
+                case "for":
+                    return ParseFor();
+                case "while":
+                    return ParseWhile(isUntil: false);
+                case "until":
+                    return ParseWhile(isUntil: true);
+                case "case":
+                    return ParseCase();
+                case "function":
+                    return ParseFunction();
+            }
+
+            // Check for name() { ... } pattern
+            if (Lookahead(1)?.Type == TokenType.LParen && Lookahead(2)?.Type == TokenType.RParen)
+            {
+                return ParseFunctionNameParens();
+            }
+        }
+
+        return ParseSimpleCommand();
     }
 
     // ──── Simple Command Parser ────
@@ -705,6 +906,16 @@ public sealed class Parser
     /// </summary>
     private Token Current() =>
         _pos < _tokens.Count ? _tokens[_pos] : _tokens[^1]; // return EOF if past end
+
+    /// <summary>
+    /// Looks ahead <paramref name="offset"/> tokens without advancing.
+    /// Returns null if the offset is beyond the token list.
+    /// </summary>
+    private Token? Lookahead(int offset)
+    {
+        var idx = _pos + offset;
+        return idx < _tokens.Count ? _tokens[idx] : null;
+    }
 
     /// <summary>
     /// Returns the current token and advances the position.

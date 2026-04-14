@@ -56,6 +56,12 @@ public enum TokenType
     /// <summary>Right parenthesis: )</summary>
     RParen,
 
+    /// <summary>Left brace: {</summary>
+    LBrace,
+
+    /// <summary>Right brace: }</summary>
+    RBrace,
+
     /// <summary>A comment (ignored by the parser).</summary>
     Comment,
 

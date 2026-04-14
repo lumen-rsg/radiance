@@ -30,4 +30,7 @@ public interface IAstVisitor<T>
 
     /// <summary>Visits a case statement node.</summary>
     T VisitCase(CaseNode node);
+
+    /// <summary>Visits a function definition node.</summary>
+    T VisitFunction(FunctionNode node);
 }

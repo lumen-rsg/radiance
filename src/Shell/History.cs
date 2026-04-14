@@ -77,4 +77,40 @@ public sealed class History
     /// Returns all history entries in order.
     /// </summary>
     public IEnumerable<string> GetAll() => _entries;
+
+    /// <summary>
+    /// Clears all history entries.
+    /// </summary>
+    public void Clear()
+    {
+        _entries.Clear();
+        _navigationIndex = -1;
+    }
+
+    /// <summary>
+    /// Deletes a history entry by 1-based index.
+    /// </summary>
+    /// <param name="offset">1-based index of the entry to delete.</param>
+    /// <returns>True if the entry was deleted, false if the offset was out of range.</returns>
+    public bool Delete(int offset)
+    {
+        if (offset < 1 || offset > _entries.Count)
+            return false;
+
+        _entries.RemoveAt(offset - 1);
+        _navigationIndex = _entries.Count;
+        return true;
+    }
+
+    /// <summary>
+    /// Gets the entry at the given 1-based index, or null if out of range.
+    /// </summary>
+    /// <param name="index">1-based history index.</param>
+    /// <returns>The entry, or null.</returns>
+    public string? GetEntry(int index)
+    {
+        if (index < 1 || index > _entries.Count)
+            return null;
+        return _entries[index - 1];
+    }
 }

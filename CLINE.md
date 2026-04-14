@@ -42,7 +42,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | 3 | Pipelines & Redirections | ✅ Complete | Pipes (`\|`), file redirects (`>`, `<`, `>>`) |
 | 4 | Variables & Expansion | ✅ Complete | `$VAR`, `$(cmd)`, `$((expr))`, tilde, glob |
 | 5 | Control Flow | ✅ Complete | `if`, `for`, `while`, `case` |
-| 6 | Advanced Features | ⬜ Not Started | Functions, aliases, job control, history, completion |
+| 6 | Advanced Features | ✅ Complete | Functions, aliases, job control, history, completion |
 | 7 | Script Execution & Polish | ⬜ Not Started | `.sh` files, `source`, config, colorized output |
 | 8 | Testing & Hardening | ⬜ Not Started | Unit/integration tests, POSIX compliance |
 
@@ -86,6 +86,88 @@ Radiance/
 ```
 
 ## Changelog
+
+### [0.6.0] — Phase 6: Advanced Features ✅
+
+**Added:**
+
+**Shell Functions:**
+- New `FunctionNode` (`src/Parser/Ast/FunctionNode.cs`) — AST node for function definitions
+- Updated `IAstVisitor<T>` with `VisitFunction` method
+- Updated parser with two function definition syntaxes:
+  - `function name { body; }` — via `ParseFunction()`
+  - `name() { body; }` — via `ParseFunctionNameParens()`
+  - `ParseBraceBody()` — parses command list inside `{ ... }`, used by function bodies
+- Updated `ShellInterpreter`:
+  - `VisitFunction` — registers function in `ShellContext`
+  - `ExecuteFunction` — calls function with scope push/pop, positional parameter save/restore, `FUNCNAME` tracking
+  - Function dispatch in `VisitSimpleCommand` — BASH order: function → builtin → external
+  - `DescribePipeline()` — human-readable command text for job display
+- Updated `ShellContext`:
+  - Function storage (`SetFunction`, `GetFunction`, `HasFunction`, `UnsetFunction`, `FunctionNames`)
+  - Variable scope stack (`PushScope`, `PopScope`, `ScopeDepth`) for function-local variables
+  - Positional parameter scope stack (`PushPositionalParams`, `PopPositionalParams`) for function arguments
+  - `ReturnRequested` / `ReturnExitCode` flags for `return` builtin support
+  - `FunctionDef` record type
+- New builtins:
+  - `return` (`src/Builtins/ReturnCommand.cs`) — exits function with optional exit code
+  - `local` (`src/Builtins/LocalCommand.cs`) — declares local variables in function scope
+
+**Aliases:**
+- Updated `ShellContext` with alias storage (`SetAlias`, `GetAlias`, `UnsetAlias`, `UnsetAllAliases`, `Aliases`)
+- New builtins:
+  - `alias` (`src/Builtins/AliasCommand.cs`) — define/display aliases (`alias name=value`, `alias`, `alias name`)
+  - `unalias` (`src/Builtins/UnaliasCommand.cs`) — remove aliases (`unalias name`, `unalias -a`)
+- Alias expansion in `RadianceShell.ExpandAliases()` — expands first word of each command if it matches an alias
+- Updated `type` builtin to recognize aliases and functions in BASH resolution order
+
+**Background Jobs & `&` Operator:**
+- New `JobManager` (`src/Interpreter/JobManager.cs`) — tracks background jobs:
+  - `Job` class with job number, process, state, exit code, completion signal
+  - `JobState` enum (Running, Stopped, Done)
+  - `AddJob` / `CompleteJob` / `GetJob` / `WaitForJob` / `UpdateAndCollectCompleted`
+  - Thread-pool job support via `ManualResetEventSlim` for completion signaling
+- Updated `ShellContext` — `JobManager` property
+- Updated `ShellInterpreter.VisitList` — `&` separator triggers background execution via `ThreadPool.QueueUserWorkItem`
+- New builtins:
+  - `jobs` (`src/Builtins/JobsCommand.cs`) — list background jobs with status
+  - `fg` (`src/Builtins/FgCommand.cs`) — bring background job to foreground
+- Updated `RadianceShell` — `NotifyCompletedJobs()` prints notifications at each prompt
+
+**Enhanced History:**
+- New `history` builtin (`src/Builtins/HistoryCommand.cs`):
+  - `history` — list all entries
+  - `history N` — show last N entries
+  - `history -c` — clear history
+  - `history -d N` — delete entry at offset N
+- Updated `History` class with `Clear()`, `Delete()`, `GetEntry()` methods
+- Wired `HistoryCommand` to shell's `History` instance via `BuiltinRegistry.TryGetCommand()`
+- Added `TryGetCommand()` to `BuiltinRegistry`
+
+**Tab Completion:**
+- Full tab completion in `RadianceShell.ReadLine()`:
+  - Command position: completes builtins, functions, aliases, and PATH executables
+  - Argument position: completes file/directory paths relative to CWD
+  - Common prefix completion for multiple matches
+  - Multiple match display in columns (like BASH)
+  - `FindCommonPrefix()` / `ApplyCompletion()` / `HandleTabCompletion()` helpers
+
+**Grammar additions:**
+```
+command         := simple_command | compound_command | function_definition
+function_def    := 'function' WORD ('()')? '{' list '}' | WORD '()' '{' list '}'
+```
+
+**New files:**
+- `src/Parser/Ast/FunctionNode.cs`
+- `src/Builtins/ReturnCommand.cs`
+- `src/Builtins/LocalCommand.cs`
+- `src/Builtins/AliasCommand.cs`
+- `src/Builtins/UnaliasCommand.cs`
+- `src/Builtins/JobsCommand.cs`
+- `src/Builtins/FgCommand.cs`
+- `src/Builtins/HistoryCommand.cs`
+- `src/Interpreter/JobManager.cs`
 
 ### [0.5.0] — Phase 5: Control Flow ✅
 

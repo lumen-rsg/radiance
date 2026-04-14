@@ -1,20 +1,34 @@
+using Radiance.Parser.Ast;
+
 namespace Radiance.Interpreter;
 
 /// <summary>
 /// Holds the current shell execution state: environment variables, shell variables,
-/// working directory, last exit code, etc.
+/// working directory, last exit code, functions, aliases, etc.
+/// Supports variable scoping for shell functions via a scope stack.
 /// </summary>
 public sealed class ShellContext
 {
     /// <summary>
-    /// Shell variables (not exported to child processes).
+    /// Shell variable scopes. The last element is the current (innermost) scope.
+    /// Index 0 is the global scope. Function calls push new scopes.
     /// </summary>
-    private readonly Dictionary<string, string> _shellVariables = new();
+    private readonly List<Dictionary<string, string>> _variableScopes = [new()];
 
     /// <summary>
     /// Environment variables marked for export to child processes.
     /// </summary>
     private readonly HashSet<string> _exportedVars = new();
+
+    /// <summary>
+    /// Registered shell functions. Key is the function name.
+    /// </summary>
+    private readonly Dictionary<string, FunctionDef> _functions = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Registered shell aliases. Key is the alias name, value is the expansion.
+    /// </summary>
+    private readonly Dictionary<string, string> _aliases = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Gets or sets the last exit code from a command.
@@ -33,6 +47,11 @@ public sealed class ShellContext
     private List<string> _positionalParams = [];
 
     /// <summary>
+    /// Positional parameter scope stack for function calls.
+    /// </summary>
+    private readonly Stack<List<string>> _positionalParamScopes = new();
+
+    /// <summary>
     /// The shell name ($0) — typically "radiance" or the script path.
     /// </summary>
     public string ShellName { get; set; } = "radiance";
@@ -48,29 +67,78 @@ public sealed class ShellContext
     public string ShellOptions { get; set; } = "";
 
     /// <summary>
-    /// Sets a shell variable. If it is already exported, it also updates the environment.
+    /// The job manager for tracking background jobs.
+    /// </summary>
+    public JobManager JobManager { get; } = new();
+
+    /// <summary>
+    /// Flag indicating that a <c>return</c> was triggered inside a function.
+    /// The interpreter checks this after each command execution inside functions.
+    /// </summary>
+    public bool ReturnRequested { get; set; } = false;
+
+    /// <summary>
+    /// The exit code to return from the current function.
+    /// </summary>
+    public int ReturnExitCode { get; set; } = 0;
+
+    // ──── Variable Access (scope-aware) ────
+
+    /// <summary>
+    /// The current (innermost) variable scope.
+    /// </summary>
+    private Dictionary<string, string> CurrentScope => _variableScopes[^1];
+
+    /// <summary>
+    /// Sets a shell variable in the current scope. If it is already exported, updates the environment.
     /// </summary>
     /// <param name="name">The variable name.</param>
     /// <param name="value">The variable value.</param>
     public void SetVariable(string name, string value)
     {
-        _shellVariables[name] = value;
-        if (_exportedVars.Contains(name))
+        // Check if the variable exists in any scope — update it there
+        for (var i = _variableScopes.Count - 1; i >= 0; i--)
         {
-            Environment.SetEnvironmentVariable(name, value);
+            if (_variableScopes[i].ContainsKey(name))
+            {
+                _variableScopes[i][name] = value;
+                if (_exportedVars.Contains(name))
+                    Environment.SetEnvironmentVariable(name, value);
+                return;
+            }
         }
+
+        // Not found — set in current scope
+        CurrentScope[name] = value;
+        if (_exportedVars.Contains(name))
+            Environment.SetEnvironmentVariable(name, value);
+    }
+
+    /// <summary>
+    /// Sets a local variable in the current (innermost) scope.
+    /// Used by the <c>local</c> builtin inside functions.
+    /// </summary>
+    /// <param name="name">The variable name.</param>
+    /// <param name="value">The variable value.</param>
+    public void SetLocalVariable(string name, string value)
+    {
+        CurrentScope[name] = value;
     }
 
     /// <summary>
     /// Gets the value of a shell or environment variable.
-    /// Looks in shell variables first, then falls back to environment variables.
+    /// Searches scopes from innermost to outermost, then falls back to environment.
     /// </summary>
     /// <param name="name">The variable name.</param>
     /// <returns>The variable value, or empty string if not found.</returns>
     public string GetVariable(string name)
     {
-        if (_shellVariables.TryGetValue(name, out var value))
-            return value;
+        // Search from innermost scope outward
+        for (var i = _variableScopes.Count - 1; i >= 0; i--)
+        {
+            if (_variableScopes[i].TryGetValue(name, out var value))
+                return value;
+        }
 
         return Environment.GetEnvironmentVariable(name) ?? string.Empty;
     }
@@ -83,10 +151,9 @@ public sealed class ShellContext
     public void ExportVariable(string name)
     {
         _exportedVars.Add(name);
-        if (_shellVariables.TryGetValue(name, out var value))
-        {
+        var value = GetVariable(name);
+        if (!string.IsNullOrEmpty(value))
             Environment.SetEnvironmentVariable(name, value);
-        }
     }
 
     /// <summary>
@@ -96,18 +163,19 @@ public sealed class ShellContext
     /// <param name="value">The variable value.</param>
     public void ExportVariable(string name, string value)
     {
-        _shellVariables[name] = value;
+        SetVariable(name, value);
         _exportedVars.Add(name);
         Environment.SetEnvironmentVariable(name, value);
     }
 
     /// <summary>
-    /// Unsets a shell variable. If exported, also removes it from the environment.
+    /// Unsets a shell variable from all scopes. If exported, also removes from the environment.
     /// </summary>
     /// <param name="name">The variable name.</param>
     public void UnsetVariable(string name)
     {
-        _shellVariables.Remove(name);
+        foreach (var scope in _variableScopes)
+            scope.Remove(name);
         _exportedVars.Remove(name);
         Environment.SetEnvironmentVariable(name, null);
     }
@@ -120,14 +188,120 @@ public sealed class ShellContext
     public bool IsExported(string name) => _exportedVars.Contains(name);
 
     /// <summary>
-    /// Gets all shell variable names.
+    /// Gets all shell variable names from all scopes (for display purposes).
     /// </summary>
-    public IEnumerable<string> ShellVariableNames => _shellVariables.Keys;
+    public IEnumerable<string> ShellVariableNames
+    {
+        get
+        {
+            var names = new HashSet<string>();
+            foreach (var scope in _variableScopes)
+                foreach (var name in scope.Keys)
+                    names.Add(name);
+            return names;
+        }
+    }
 
     /// <summary>
     /// Gets all exported variable names.
     /// </summary>
     public IEnumerable<string> ExportedVariableNames => _exportedVars;
+
+    // ──── Variable Scoping ────
+
+    /// <summary>
+    /// Pushes a new variable scope (for function calls).
+    /// </summary>
+    public void PushScope()
+    {
+        _variableScopes.Add(new Dictionary<string, string>());
+    }
+
+    /// <summary>
+    /// Pops the innermost variable scope (when a function returns).
+    /// </summary>
+    public void PopScope()
+    {
+        if (_variableScopes.Count > 1)
+            _variableScopes.RemoveAt(_variableScopes.Count - 1);
+    }
+
+    /// <summary>
+    /// Gets the current scope depth (1 = global scope).
+    /// </summary>
+    public int ScopeDepth => _variableScopes.Count;
+
+    // ──── Functions ────
+
+    /// <summary>
+    /// Registers a shell function.
+    /// </summary>
+    /// <param name="name">The function name.</param>
+    /// <param name="body">The function body AST node.</param>
+    public void SetFunction(string name, ListNode body)
+    {
+        _functions[name] = new FunctionDef(name, body);
+    }
+
+    /// <summary>
+    /// Gets a registered function by name.
+    /// </summary>
+    /// <param name="name">The function name.</param>
+    /// <returns>The function definition, or null if not found.</returns>
+    public FunctionDef? GetFunction(string name)
+    {
+        return _functions.TryGetValue(name, out var func) ? func : null;
+    }
+
+    /// <summary>
+    /// Checks if a function with the given name is registered.
+    /// </summary>
+    /// <param name="name">The function name.</param>
+    /// <returns>True if the function exists.</returns>
+    public bool HasFunction(string name) => _functions.ContainsKey(name);
+
+    /// <summary>
+    /// Unregisters a function.
+    /// </summary>
+    /// <param name="name">The function name.</param>
+    public void UnsetFunction(string name) => _functions.Remove(name);
+
+    /// <summary>
+    /// Gets all registered function names.
+    /// </summary>
+    public IEnumerable<string> FunctionNames => _functions.Keys;
+
+    // ──── Aliases ────
+
+    /// <summary>
+    /// Sets an alias.
+    /// </summary>
+    /// <param name="name">The alias name.</param>
+    /// <param name="value">The alias expansion.</param>
+    public void SetAlias(string name, string value) => _aliases[name] = value;
+
+    /// <summary>
+    /// Gets an alias expansion by name.
+    /// </summary>
+    /// <param name="name">The alias name.</param>
+    /// <returns>The expansion string, or null if not found.</returns>
+    public string? GetAlias(string name) => _aliases.TryGetValue(name, out var value) ? value : null;
+
+    /// <summary>
+    /// Removes an alias.
+    /// </summary>
+    /// <param name="name">The alias name.</param>
+    public void UnsetAlias(string name) => _aliases.Remove(name);
+
+    /// <summary>
+    /// Removes all aliases.
+    /// </summary>
+    public void UnsetAllAliases() => _aliases.Clear();
+
+    /// <summary>
+    /// Gets all registered aliases.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> Aliases => _aliases;
 
     // ──── Positional Parameters ────
 
@@ -163,4 +337,32 @@ public sealed class ShellContext
     /// Gets all positional parameters ($@ / $*).
     /// </summary>
     public IReadOnlyList<string> PositionalParams => _positionalParams.AsReadOnly();
+
+    /// <summary>
+    /// Pushes the current positional parameters onto the stack and sets new ones.
+    /// Used when calling functions to preserve and replace $1, $2, etc.
+    /// </summary>
+    /// <param name="args">The new positional parameters (function arguments).</param>
+    public void PushPositionalParams(List<string> args)
+    {
+        _positionalParamScopes.Push(new List<string>(_positionalParams));
+        _positionalParams = new List<string>(args);
+    }
+
+    /// <summary>
+    /// Pops the positional parameter stack, restoring the previous parameters.
+    /// Called when a function returns.
+    /// </summary>
+    public void PopPositionalParams()
+    {
+        if (_positionalParamScopes.Count > 0)
+            _positionalParams = _positionalParamScopes.Pop();
+    }
 }
+
+/// <summary>
+/// Represents a shell function definition.
+/// </summary>
+/// <param name="Name">The function name.</param>
+/// <param name="Body">The function body AST node.</param>
+public sealed record FunctionDef(string Name, ListNode Body);

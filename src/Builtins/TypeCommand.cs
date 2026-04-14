@@ -33,7 +33,17 @@ public sealed class TypeCommand : IBuiltinCommand
         {
             var name = args[i];
 
-            if (_registry.IsBuiltin(name))
+            // Check in BASH order: alias → function → builtin → file
+            var alias = context.GetAlias(name);
+            if (alias is not null)
+            {
+                Console.WriteLine($"{name} is aliased to '{alias}'");
+            }
+            else if (context.HasFunction(name))
+            {
+                Console.WriteLine($"{name} is a function");
+            }
+            else if (_registry.IsBuiltin(name))
             {
                 Console.WriteLine($"{name} is a shell builtin");
             }

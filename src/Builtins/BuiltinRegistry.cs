@@ -52,6 +52,14 @@ public sealed class BuiltinRegistry
     public IEnumerable<string> CommandNames => _commands.Keys;
 
     /// <summary>
+    /// Gets a registered command by name, or null if not found.
+    /// </summary>
+    /// <param name="name">The command name.</param>
+    /// <returns>The command instance, or null.</returns>
+    public IBuiltinCommand? TryGetCommand(string name) =>
+        _commands.TryGetValue(name, out var cmd) ? cmd : null;
+
+    /// <summary>
     /// Creates a new registry pre-loaded with all standard built-in commands.
     /// </summary>
     /// <returns>A fully populated <see cref="BuiltinRegistry"/>.</returns>
@@ -69,6 +77,13 @@ public sealed class BuiltinRegistry
         registry.Register(new EnvCommand());
         registry.Register(new TrueCommand());
         registry.Register(new FalseCommand());
+        registry.Register(new ReturnCommand());
+        registry.Register(new LocalCommand());
+        registry.Register(new AliasCommand());
+        registry.Register(new UnaliasCommand());
+        registry.Register(new JobsCommand());
+        registry.Register(new FgCommand());
+        registry.Register(new HistoryCommand());
         return registry;
     }
 }

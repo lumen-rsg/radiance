@@ -9,7 +9,8 @@ namespace Radiance.Shell;
 /// <summary>
 /// The main interactive shell (REPL loop). Reads input, tokenizes with the lexer,
 /// parses into an AST, and interprets via the AST-walking interpreter.
-/// Supports multi-line input for control flow constructs (if/for/while/case).
+/// Supports multi-line input for control flow constructs (if/for/while/case/function).
+/// Handles alias expansion, background jobs, and tab completion.
 /// </summary>
 public sealed class RadianceShell
 {
@@ -25,7 +26,7 @@ public sealed class RadianceShell
     /// </summary>
     private static readonly HashSet<string> BlockOpeners = new(StringComparer.Ordinal)
     {
-        "if", "for", "while", "until", "case"
+        "if", "for", "while", "until", "case", "function"
     };
 
     /// <summary>
@@ -48,6 +49,12 @@ public sealed class RadianceShell
         _interpreter = new ShellInterpreter(_context, _builtins, _processManager);
         _history = new History();
 
+        // Wire up history command with the history instance
+        if (_builtins.TryGetCommand("history") is HistoryCommand historyCmd)
+        {
+            historyCmd.HistoryInstance = _history;
+        }
+
         // Wire up exit handling
         ExitCommand.ExitRequested += (_, code) =>
         {
@@ -66,6 +73,9 @@ public sealed class RadianceShell
 
         while (_running)
         {
+            // Check for completed background jobs
+            NotifyCompletedJobs();
+
             // Render prompt
             var prompt = Prompt.Render(_context);
             Console.Write(prompt);
@@ -90,6 +100,18 @@ public sealed class RadianceShell
         }
 
         return _context.LastExitCode;
+    }
+
+    /// <summary>
+    /// Checks for completed background jobs and prints notifications.
+    /// </summary>
+    private void NotifyCompletedJobs()
+    {
+        var completed = _context.JobManager.UpdateAndCollectCompleted();
+        foreach (var job in completed)
+        {
+            Console.WriteLine($"\n[{job.JobNumber}]+  Done                    {job.CommandText}");
+        }
     }
 
     /// <summary>
@@ -176,6 +198,16 @@ public sealed class RadianceShell
                     }
                 }
 
+                // Handle { and } as block delimiters for functions
+                if (token.Type == TokenType.LBrace)
+                {
+                    stack.Push("{");
+                }
+                else if (token.Type == TokenType.RBrace && stack.Count > 0 && stack.Peek() == "{")
+                {
+                    stack.Pop();
+                }
+
                 i++;
             }
         }
@@ -213,13 +245,17 @@ public sealed class RadianceShell
 
     /// <summary>
     /// Executes a single line of input by lexing, parsing, and interpreting.
+    /// Handles alias expansion before parsing.
     /// </summary>
     private void ExecuteInput(string input)
     {
         try
         {
+            // Expand aliases in the input
+            var expandedInput = ExpandAliases(input);
+
             // Lex: input → tokens
-            var lexer = new Lexer.Lexer(input);
+            var lexer = new Lexer.Lexer(expandedInput);
             var tokens = lexer.Tokenize();
 
             // Parse: tokens → AST
@@ -240,7 +276,59 @@ public sealed class RadianceShell
     }
 
     /// <summary>
+    /// Performs alias expansion on the first word of each command in the input.
+    /// Only expands aliases that are the first word in a command position.
+    /// Prevents recursive expansion of an alias to itself.
+    /// </summary>
+    /// <param name="input">The raw input string.</param>
+    /// <returns>The input with aliases expanded.</returns>
+    private string ExpandAliases(string input)
+    {
+        // Simple approach: tokenize, check first word of each command for aliases
+        var lines = input.Split('\n');
+
+        for (var lineIdx = 0; lineIdx < lines.Length; lineIdx++)
+        {
+            var line = lines[lineIdx];
+            var trimmed = line.TrimStart();
+
+            if (string.IsNullOrEmpty(trimmed))
+                continue;
+
+            // Find the first word
+            var firstWordEnd = 0;
+            while (firstWordEnd < trimmed.Length && !char.IsWhiteSpace(trimmed[firstWordEnd])
+                   && trimmed[firstWordEnd] != ';' && trimmed[firstWordEnd] != '|'
+                   && trimmed[firstWordEnd] != '&' && trimmed[firstWordEnd] != '('
+                   && trimmed[firstWordEnd] != '{')
+            {
+                firstWordEnd++;
+            }
+
+            if (firstWordEnd == 0)
+                continue;
+
+            var firstWord = trimmed[..firstWordEnd];
+
+            // Don't expand aliases that are the same as the alias being defined
+            if (firstWord == "alias" || firstWord == "unalias")
+                continue;
+
+            var expansion = _context.GetAlias(firstWord);
+            if (expansion is not null)
+            {
+                // Replace the first word with the expansion
+                var rest = trimmed[firstWordEnd..];
+                lines[lineIdx] = expansion + rest;
+            }
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    /// <summary>
     /// Reads a line of input with basic line editing support.
+    /// Supports history navigation (up/down), Ctrl+C, Ctrl+D, and tab completion.
     /// </summary>
     private string? ReadLine()
     {
@@ -315,7 +403,7 @@ public sealed class RadianceShell
 
             if (key.Key == ConsoleKey.Tab)
             {
-                // Tab completion — future phase
+                HandleTabCompletion(sb, left);
                 continue;
             }
 
@@ -325,6 +413,187 @@ public sealed class RadianceShell
                 Console.Write(key.KeyChar);
             }
         }
+    }
+
+    /// <summary>
+    /// Handles tab completion for the current input.
+    /// </summary>
+    /// <param name="sb">The current input buffer.</param>
+    /// <param name="left">The starting cursor column.</param>
+    private void HandleTabCompletion(StringBuilder sb, int left)
+    {
+        var input = sb.ToString();
+        if (string.IsNullOrEmpty(input))
+            return;
+
+        // Find the last word being typed
+        var lastSpace = input.LastIndexOf(' ');
+        var prefix = lastSpace >= 0 ? input[(lastSpace + 1)..] : input;
+        var hasSpace = lastSpace >= 0;
+
+        if (!hasSpace)
+        {
+            // Command completion — check builtins, functions, aliases, then executables
+            var matches = new List<string>();
+
+            // Builtins
+            foreach (var name in _builtins.CommandNames)
+            {
+                if (name.StartsWith(prefix, StringComparison.Ordinal))
+                    matches.Add(name);
+            }
+
+            // Functions
+            foreach (var name in _context.FunctionNames)
+            {
+                if (name.StartsWith(prefix, StringComparison.Ordinal) && !matches.Contains(name))
+                    matches.Add(name);
+            }
+
+            // Aliases
+            foreach (var name in _context.Aliases.Keys)
+            {
+                if (name.StartsWith(prefix, StringComparison.Ordinal) && !matches.Contains(name))
+                    matches.Add(name);
+            }
+
+            // Executables in PATH
+            try
+            {
+                var pathDirs = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator);
+                foreach (var dir in pathDirs)
+                {
+                    try
+                    {
+                        if (!Directory.Exists(dir))
+                            continue;
+                        foreach (var file in Directory.EnumerateFiles(dir, $"{prefix}*"))
+                        {
+                            var name = Path.GetFileName(file);
+                            if (!matches.Contains(name))
+                                matches.Add(name);
+                        }
+                    }
+                    catch { /* ignore permission errors */ }
+                }
+            }
+            catch { /* ignore */ }
+
+            ApplyCompletion(matches, sb, left, prefix);
+        }
+        else
+        {
+            // File/directory completion
+            var matches = new List<string>();
+
+            try
+            {
+                var dir = Path.GetDirectoryName(prefix);
+                var filePrefix = Path.GetFileName(prefix);
+
+                if (string.IsNullOrEmpty(dir))
+                    dir = _context.CurrentDirectory;
+
+                if (Directory.Exists(dir))
+                {
+                    foreach (var entry in Directory.EnumerateFileSystemEntries(dir, $"{filePrefix}*"))
+                    {
+                        var name = Path.GetFileName(entry);
+                        if (Directory.Exists(entry))
+                            name += Path.DirectorySeparatorChar;
+                        matches.Add(name);
+                    }
+                }
+            }
+            catch { /* ignore */ }
+
+            ApplyCompletion(matches, sb, left, prefix, lastSpace + 1);
+        }
+    }
+
+    /// <summary>
+    /// Applies tab completion results to the input buffer.
+    /// </summary>
+    /// <param name="matches">The completion candidates.</param>
+    /// <param name="sb">The input buffer.</param>
+    /// <param name="left">The starting cursor column.</param>
+    /// <param name="prefix">The text being completed.</param>
+    /// <param name="replaceStart">The index in the buffer to start replacing from (-1 for end of word before prefix).</param>
+    private void ApplyCompletion(List<string> matches, StringBuilder sb, int left, string prefix, int replaceStart = -1)
+    {
+        if (matches.Count == 0)
+            return;
+
+        if (matches.Count == 1)
+        {
+            // Single match — complete it
+            var completion = matches[0];
+            var startPos = replaceStart >= 0 ? replaceStart : sb.Length - prefix.Length;
+
+            ClearCurrentLine(left, sb.Length);
+            sb.Remove(startPos, sb.Length - startPos);
+            sb.Append(completion);
+            Console.SetCursorPosition(left, Console.CursorTop);
+            Console.Write(sb.ToString());
+        }
+        else
+        {
+            // Multiple matches — find common prefix and complete that
+            var commonPrefix = FindCommonPrefix(matches);
+            if (commonPrefix.Length > prefix.Length)
+            {
+                var startPos = replaceStart >= 0 ? replaceStart : sb.Length - prefix.Length;
+                var toAdd = commonPrefix[prefix.Length..];
+
+                ClearCurrentLine(left, sb.Length);
+                sb.Append(toAdd);
+                Console.SetCursorPosition(left, Console.CursorTop);
+                Console.Write(sb.ToString());
+            }
+            else
+            {
+                // Show all matches
+                Console.WriteLine();
+                var maxNameLen = matches.Max(m => m.Length) + 2;
+                var cols = Math.Max(1, Console.WindowWidth / maxNameLen);
+                var i = 0;
+                foreach (var match in matches)
+                {
+                    Console.Write(match.PadRight(maxNameLen));
+                    i++;
+                    if (i % cols == 0)
+                        Console.WriteLine();
+                }
+                if (i % cols != 0)
+                    Console.WriteLine();
+
+                // Re-display prompt and current input
+                var prompt = Prompt.Render(_context);
+                Console.Write(prompt);
+                Console.Write(sb.ToString());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Finds the longest common prefix among a set of strings.
+    /// </summary>
+    private static string FindCommonPrefix(List<string> strings)
+    {
+        if (strings.Count == 0)
+            return string.Empty;
+
+        var prefix = strings[0];
+        foreach (var s in strings)
+        {
+            var minLen = Math.Min(prefix.Length, s.Length);
+            var i = 0;
+            while (i < minLen && prefix[i] == s[i])
+                i++;
+            prefix = prefix[..i];
+        }
+
+        return prefix;
     }
 
     /// <summary>
@@ -347,7 +616,7 @@ public sealed class RadianceShell
         // Set shell variables
         context.SetVariable("PWD", context.CurrentDirectory);
         context.SetVariable("SHELL", "radiance");
-        context.SetVariable("RADIANCE_VERSION", "0.5.0");
+        context.SetVariable("RADIANCE_VERSION", "0.6.0");
 
         // Export key variables
         context.ExportVariable("PATH");
@@ -364,7 +633,7 @@ public sealed class RadianceShell
     /// </summary>
     private static void PrintWelcome()
     {
-        var version = "0.5.0";
+        var version = "0.6.0";
         Console.WriteLine();
         Console.WriteLine($"\x1b[1;36m  ╭─────────────────────────────────╮\x1b[0m");
         Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{version} ✦\x1b[1;36m      │\x1b[0m");

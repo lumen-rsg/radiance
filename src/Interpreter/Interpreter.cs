@@ -80,12 +80,14 @@ public sealed class ShellInterpreter : IAstVisitor<int>
 
         for (var i = 0; i < node.Pipelines.Count; i++)
         {
-            // Check the separator from the previous pipeline to decide whether to execute
+            // Check conditional execution based on separator BEFORE this pipeline
             if (i > 0)
             {
-                var separator = node.Separators.Count >= i ? node.Separators[i - 1] : Lexer.TokenType.Semicolon;
+                var prevSeparator = i - 1 < node.Separators.Count
+                    ? node.Separators[i - 1]
+                    : Lexer.TokenType.Semicolon;
 
-                switch (separator)
+                switch (prevSeparator)
                 {
                     case Lexer.TokenType.And when exitCode != 0:
                         // && but previous failed — skip this pipeline
@@ -93,14 +95,33 @@ public sealed class ShellInterpreter : IAstVisitor<int>
                     case Lexer.TokenType.Or when exitCode == 0:
                         // || but previous succeeded — skip this pipeline
                         continue;
-                    case Lexer.TokenType.Ampersand:
-                        // & — background execution (Phase 6)
-                        // For now, just execute normally
-                        break;
                 }
             }
 
-            exitCode = node.Pipelines[i].Accept(this);
+            // Check if this pipeline should run in background (& separator AFTER it)
+            var isBackground = i < node.Separators.Count
+                               && node.Separators[i] == Lexer.TokenType.Ampersand;
+
+            if (isBackground)
+            {
+                var bgPipeline = node.Pipelines[i];
+                var bgCommandText = DescribePipeline(bgPipeline);
+                var job = _context.JobManager.AddJob(bgCommandText, null);
+
+                // Run the pipeline in a background thread
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    var bgExitCode = bgPipeline.Accept(this);
+                    _context.JobManager.CompleteJob(job.JobNumber, bgExitCode);
+                });
+
+                _context.LastBackgroundPid = job.JobNumber;
+                exitCode = 0; // Background launch returns 0
+            }
+            else
+            {
+                exitCode = node.Pipelines[i].Accept(this);
+            }
         }
 
         return exitCode;
@@ -128,7 +149,7 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// <item>Process prefix assignments</item>
     /// <item>Expand all words using the full expansion pipeline</item>
     /// <item>If there are no words, treat assignments as permanent shell variable assignments</item>
-    /// <item>If there are words, dispatch to builtin or external command</item>
+    /// <item>If there are words, dispatch in BASH order: alias → function → builtin → external</item>
     /// </list>
     /// </remarks>
     public int VisitSimpleCommand(SimpleCommandNode node)
@@ -171,7 +192,7 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         }
 
         // If there are prefix assignments with a command, set them.
-        // TODO Phase 5+: Make these temporary for the command only.
+        // TODO Phase 7+: Make these temporary for the command only.
         foreach (var assignment in assignments)
         {
             var value = _expander.ExpandString(assignment.Value);
@@ -181,7 +202,14 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         var commandName = expandedWords[0];
         var args = expandedWords.ToArray();
 
-        // Try builtin first
+        // Try function first (BASH order: function → builtin → external)
+        // (Alias expansion happens at the parser/expander level)
+        if (_context.HasFunction(commandName))
+        {
+            return ExecuteFunction(commandName, expandedWords);
+        }
+
+        // Try builtin
         if (_builtins.TryExecute(commandName, args, _context, out var exitCode))
         {
             return exitCode;
@@ -429,6 +457,75 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         return result.ToString();
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Registers a function definition in the shell context.
+    /// Does not execute the body — the body is stored and executed when the function is called.
+    /// </remarks>
+    public int VisitFunction(FunctionNode node)
+    {
+        _context.SetFunction(node.Name, node.Body);
+        return 0;
+    }
+
+    /// <summary>
+    /// Executes a function call by name with the given arguments.
+    /// Pushes a new variable scope and positional parameters, executes the body,
+    /// and pops the scope when done. Supports <c>return</c> via <see cref="ShellContext.ReturnRequested"/>.
+    /// </summary>
+    /// <param name="name">The function name.</param>
+    /// <param name="args">The arguments (including function name as args[0]).</param>
+    /// <returns>The exit code of the function body or the <c>return</c> exit code.</returns>
+    private int ExecuteFunction(string name, List<string> args)
+    {
+        var func = _context.GetFunction(name);
+        if (func is null)
+        {
+            Console.Error.WriteLine($"radiance: {name}: function not found");
+            return 127;
+        }
+
+        // Save FUNCNAME tracking
+        var prevFuncName = _context.GetVariable("FUNCNAME");
+
+        // Push a new variable scope for the function
+        _context.PushScope();
+
+        // Set positional parameters (args[0] is function name, args[1..] are the params)
+        var funcArgs = new List<string> { name };
+        for (var i = 1; i < args.Count; i++)
+            funcArgs.Add(args[i]);
+
+        _context.PushPositionalParams(funcArgs);
+        _context.SetLocalVariable("FUNCNAME", name);
+
+        // Clear the return flag
+        _context.ReturnRequested = false;
+        _context.ReturnExitCode = 0;
+
+        try
+        {
+            var exitCode = func.Body.Accept(this);
+
+            // If return was requested, use its exit code
+            if (_context.ReturnRequested)
+                exitCode = _context.ReturnExitCode;
+
+            return exitCode;
+        }
+        finally
+        {
+            // Pop scope and restore positional parameters
+            _context.PopScope();
+            _context.PopPositionalParams();
+            _context.ReturnRequested = false;
+
+            // Restore FUNCNAME
+            if (!string.IsNullOrEmpty(prevFuncName))
+                _context.SetVariable("FUNCNAME", prevFuncName);
+        }
+    }
+
     /// <summary>
     /// Expands variables in a simple string (legacy method for backward compatibility).
     /// For full expansion, use the <see cref="Expander"/> directly.
@@ -436,5 +533,19 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     internal string ExpandVariables(string input)
     {
         return _expander.ExpandString(input);
+    }
+
+    /// <summary>
+    /// Produces a human-readable description of a pipeline node for job display.
+    /// </summary>
+    private static string DescribePipeline(AstNode node)
+    {
+        return node switch
+        {
+            PipelineNode p => string.Join(" | ", p.Commands.Select(DescribePipeline)),
+            SimpleCommandNode c => string.Join(" ", c.Words.Select(w =>
+                string.Concat(w.Select(p => p.Text)))),
+            _ => node.GetType().Name
+        };
     }
 }
