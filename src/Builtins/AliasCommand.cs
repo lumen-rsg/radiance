@@ -1,3 +1,5 @@
+using Radiance.Interpreter;
+
 namespace Radiance.Builtins;
 
 /// <summary>

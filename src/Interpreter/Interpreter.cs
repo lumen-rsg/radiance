@@ -106,7 +106,7 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             {
                 var bgPipeline = node.Pipelines[i];
                 var bgCommandText = DescribePipeline(bgPipeline);
-                var job = _context.JobManager.AddJob(bgCommandText, null);
+                var job = _context.JobManager.AddJob(bgCommandText);
 
                 // Run the pipeline in a background thread
                 System.Threading.ThreadPool.QueueUserWorkItem(_ =>
