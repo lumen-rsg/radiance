@@ -1591,7 +1591,7 @@ public sealed class RadianceShell
         Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{Version} ✦\x1b[1;36m      │\x1b[0m");
         Console.WriteLine("\x1b[1;36m  │  \x1b[37mA BASH interpreter in C#\x1b[1;36m       │\x1b[0m");
         Console.WriteLine("\x1b[1;36m  ╰─────────────────────────────────╯\x1b[0m");
-        Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try \x1b[1;33m'radiance'\x1b[0m\x1b[37m for something fun!\x1b[0m");
+        Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try \x1b[1;33m'radiance'\x1b[0m\x1b[37m for fun, \x1b[1;33m'agent'\x1b[0m\x1b[37m for AI help!\x1b[0m");
         Console.WriteLine();
     }
 }

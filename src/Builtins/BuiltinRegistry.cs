@@ -102,6 +102,7 @@ public sealed class BuiltinRegistry
         registry.Register(new TestCommand());
         registry.Register(TestCommand.CreateBracketAlias());
         registry.Register(new RadianceCommand());
+        registry.Register(new AgentCommand());
         return registry;
     }
 }
