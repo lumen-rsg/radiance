@@ -95,6 +95,18 @@ Radiance/
 
 ## Changelog
 
+### [1.3.3] — TTY Fix for Interactive Commands ✅
+
+**Bug Fixes:**
+
+*Interactive TUI Applications (vim, btop, htop, nano, etc.):*
+- **Fixed "Output is not to a terminal" / "Input is not from a terminal" warnings when launching vim and other interactive TUI applications** — these apps require direct terminal (TTY) access but were incorrectly getting piped/redirected streams instead
+- Root cause: In v1.2.4, a check was added to detect command substitution context: `Console.Out is not StreamWriter`. The assumption was that the default `Console.Out` is a `StreamWriter`, but on .NET it's actually `TextWriter.Synchronized(new StreamWriter(...))` which wraps it in a `SyncTextWriter` (a private subclass of `TextWriter`, NOT `StreamWriter`). So `Console.Out is not StreamWriter` was **always true**, forcing every external command into captured-output mode with redirected streams
+- Fix: Changed the check from `Console.Out is not StreamWriter` to `Console.Out is StringWriter`. This directly detects the actual command substitution case (`Console.SetOut(new StringWriter())`) without incorrectly catching the default `SyncTextWriter` wrapper
+
+**Modified files:**
+- `src/Interpreter/ProcessManager.cs` — fixed `Console.Out` type detection from `is not StreamWriter` to `is StringWriter`
+
 ### [1.3.2] — Command Output Formatting Fix ✅
 
 **Bug Fixes:**

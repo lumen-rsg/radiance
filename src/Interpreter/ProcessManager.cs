@@ -59,9 +59,11 @@ public sealed class ProcessManager
             //
             // Note: Console.IsOutputRedirected only detects OS-level stream redirection.
             // Console.SetOut() changes the TextWriter but does NOT set the OS flag.
-            // We also check if Console.Out is not a StreamWriter (the default type),
-            // which catches command substitution via SetOut(new StringWriter()).
-            if (Console.IsOutputRedirected || Console.Out is not StreamWriter)
+            // The default Console.Out is a SyncTextWriter (not StreamWriter), so checking
+            // "is not StreamWriter" would always be true. Instead, we check if Console.Out
+            // is a StringWriter, which is the actual type set during command substitution
+            // via Console.SetOut(new StringWriter()).
+            if (Console.IsOutputRedirected || Console.Out is StringWriter)
             {
                 var startInfo = BuildCapturedStartInfo(resolved, args, context);
                 using var process = new Process { StartInfo = startInfo };
