@@ -51,4 +51,60 @@ public static class Prompt
 
         return dir;
     }
+
+    /// <summary>
+    /// Gets the current git branch name, or null if not in a git repo.
+    /// </summary>
+    public static string? GetGitBranch()
+    {
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "rev-parse --abbrev-ref HEAD",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process == null) return null;
+            var output = process.StandardOutput.ReadLine()?.Trim();
+            process.WaitForExit(1000);
+            return process.ExitCode == 0 && !string.IsNullOrEmpty(output) ? output : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Checks if the current git repo has uncommitted changes.
+    /// </summary>
+    public static bool IsGitDirty()
+    {
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "status --porcelain",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process == null) return false;
+            var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(1000);
+            return process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

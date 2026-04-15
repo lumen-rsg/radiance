@@ -1,0 +1,17 @@
+{
+  // Example custom theme for Radiance shell
+  // Copy to ~/.radiance/themes/ and customize!
+  "name": "example",
+  "description": "Example custom theme - copy and modify to create your own",
+  "author": "You",
+  "left_prompt": [
+    { "type": "user", "fg": "bright_green", "bold": true, "suffix": "@" },
+    { "type": "host", "fg": "bright_cyan", "suffix": " " },
+    { "type": "cwd", "fg": "bright_blue", "bold": true, "suffix": " " },
+    { "type": "git", "fg": "bright_magenta", "dirty_fg": "bright_red", "prefix": "", "suffix": " " },
+    { "type": "prompt_char", "fg": "bright_green", "error_fg": "bright_red", "text": "❯ " }
+  ],
+  "right_prompt": [
+    { "type": "time", "fg": "dark_gray" }
+  ]
+}

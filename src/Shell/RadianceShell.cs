@@ -4,6 +4,7 @@ using Radiance.Interpreter;
 using Radiance.Lexer;
 using Radiance.Parser;
 using Radiance.Plugins;
+using Radiance.Themes;
 using Radiance.Utils;
 
 namespace Radiance.Shell;
@@ -25,6 +26,7 @@ public sealed class RadianceShell
     private readonly ShellInterpreter _interpreter;
     private readonly History _history;
     private readonly PluginManager _pluginManager;
+    private readonly ThemeManager _themeManager = new();
     private bool _running = true;
 
     /// <summary>
@@ -89,10 +91,16 @@ public sealed class RadianceShell
         // Wire up script file executor callback for shebang script execution
         _context.ScriptFileExecutor = ExecuteScript;
 
+        // Initialize theme system
+        _themeManager.Initialize();
+
         // Initialize plugin system
         _pluginManager = new PluginManager(_context, _builtins);
         var pluginCmd = new PluginCommand { Manager = _pluginManager };
         _builtins.Register(pluginCmd);
+
+        // Register theme command
+        _builtins.Register(new ThemeCommand(_themeManager));
     }
 
     /// <summary>
@@ -122,8 +130,8 @@ public sealed class RadianceShell
             // Check for completed background jobs
             NotifyCompletedJobs();
 
-            // Render prompt
-            var prompt = Prompt.Render(_context);
+            // Render prompt using theme system
+            var prompt = RenderThemePrompt();
             Console.Write(prompt);
 
             // Read input (possibly multi-line)
@@ -1369,6 +1377,51 @@ public sealed class RadianceShell
 
         return prefix;
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Theme System
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Renders the prompt using the active theme.
+    /// </summary>
+    private string RenderThemePrompt()
+    {
+        var ctx = BuildPromptContext();
+        var leftPrompt = _themeManager.RenderPrompt(ctx);
+        var rightPrompt = _themeManager.RenderRightPrompt(ctx);
+
+        if (string.IsNullOrEmpty(rightPrompt))
+            return leftPrompt;
+
+        return rightPrompt + leftPrompt;
+    }
+
+    /// <summary>
+    /// Builds a PromptContext from the current shell state.
+    /// </summary>
+    private PromptContext BuildPromptContext()
+    {
+        return new PromptContext
+        {
+            User = Environment.GetEnvironmentVariable("USER") ?? Environment.UserName,
+            Host = Environment.MachineName,
+            HomeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Cwd = _context.CurrentDirectory,
+            LastExitCode = _context.LastExitCode,
+            IsRoot = Environment.UserName == "root",
+            GitBranch = Prompt.GetGitBranch(),
+            GitDirty = Prompt.IsGitDirty(),
+            JobCount = 0,
+            Now = DateTime.Now,
+            ShellName = "radiance"
+        };
+    }
+
+    /// <summary>
+    /// Gets the active theme manager instance.
+    /// </summary>
+    public ThemeManager Themes => _themeManager;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Initialization

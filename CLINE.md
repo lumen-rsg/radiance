@@ -94,6 +94,63 @@ Radiance/
 
 ## Changelog
 
+### [1.2.0] — Theming System ✅
+
+**Added:**
+
+**Theme Engine (`src/Themes/`):**
+- `ITheme` interface — contract for themes with `RenderPrompt()`, `RenderRightPrompt()`, metadata
+- `PromptContext` — rich context object (user, host, cwd, git branch/dirty, exit code, jobs, time, etc.)
+- `ThemeBase` abstract class — ANSI color helpers, segment builders, text width calculation, `AnsiColor` enum
+- `ThemeManager` — registry, loading, switching, persistence to `~/.radiance/config.json`
+- `JsonTheme` — declarative JSON theme loader for custom themes without writing C# code
+
+**6 Built-in Themes (`src/Themes/Builtins/`):**
+- `DefaultTheme` — classic user@host cwd $ with git support
+- `MinimalTheme` — clean arrow + directory name only
+- `PowerlineTheme` — Powerline-style segments with colored backgrounds and separators
+- `RainbowTheme` — vibrant multi-color with 2-line layout
+- `DarkTheme` — optimized for dark terminal backgrounds
+- `LightTheme` — optimized for light terminal backgrounds
+
+**`theme` Built-in Command (`src/Builtins/ThemeCommand.cs`):**
+- `theme list` — list all available themes
+- `theme set <name>` — switch theme (persists to config)
+- `theme current` — show current theme info
+- `theme info <name>` — show theme details and preview
+- `theme path` — show custom themes directory
+
+**Custom JSON Themes (`~/.radiance/themes/*.json`):**
+- Declarative segment-based format with color/style customization
+- Supports: user, host, cwd, git, prompt_char, time, date, jobs, exit_code, text segments
+- Colors: named ANSI colors or hex RGB (#ff0000)
+- Style: bold, italic, fg, bg, suffix, prefix, error_fg, dirty_fg
+- Example theme: `themes/example.json`
+
+**RPROMPT Support:**
+- Right-aligned prompt via ANSI cursor manipulation
+- Used by Powerline, Rainbow, Dark, and Light themes
+
+**Shell Integration:**
+- `RadianceShell` uses `ThemeManager` for all prompt rendering
+- `Prompt.GetGitBranch()` / `Prompt.IsGitDirty()` — public git helpers for themes
+- Theme initialized in shell constructor, registered as builtin
+
+**Tests:**
+- 12 new tests covering themes, context, JSON loading, manager operations
+- All 231 tests passing
+
+**New files:**
+- `src/Themes/ITheme.cs`, `PromptContext.cs`, `ThemeBase.cs`, `ThemeManager.cs`, `JsonTheme.cs`
+- `src/Themes/Builtins/DefaultTheme.cs`, `MinimalTheme.cs`, `PowerlineTheme.cs`, `RainbowTheme.cs`, `DarkTheme.cs`, `LightTheme.cs`
+- `src/Builtins/ThemeCommand.cs`
+- `themes/example.json`
+- `tests/ThemeTests.cs`
+
+**Modified files:**
+- `src/Shell/RadianceShell.cs` — theme manager integration
+- `src/Shell/Prompt.cs` — public git helper methods
+
 ### [1.1.1] — Script Execution Bug Fix ✅
 
 **Bug Fixes:**
