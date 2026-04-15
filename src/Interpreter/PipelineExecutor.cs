@@ -147,6 +147,7 @@ public sealed class PipelineExecutor
                 // Function with redirects — capture output via Console.SetOut
                 var captured = new StringWriter();
                 var originalOut = Console.Out;
+                OutputCapture.Push();
                 try
                 {
                     Console.SetOut(captured);
@@ -161,13 +162,13 @@ public sealed class PipelineExecutor
                     }
                     else
                     {
-                        Console.SetOut(originalOut);
                         Console.Write(output);
                     }
                 }
                 finally
                 {
                     Console.SetOut(originalOut);
+                    OutputCapture.Pop();
                 }
             }
             else
@@ -246,6 +247,7 @@ public sealed class PipelineExecutor
                 // Compound command (if, for, while, case)
                 var captured = new StringWriter();
                 var origOut = Console.Out;
+                OutputCapture.Push();
                 try
                 {
                     Console.SetOut(captured);
@@ -254,6 +256,7 @@ public sealed class PipelineExecutor
                 finally
                 {
                     Console.SetOut(origOut);
+                    OutputCapture.Pop();
                 }
 
                 var output = captured.ToString();
@@ -294,6 +297,7 @@ public sealed class PipelineExecutor
                     // Builtin — capture output via Console.SetOut
                     var captured = new StringWriter();
                     var origOut = Console.Out;
+                    OutputCapture.Push();
                     try
                     {
                         Console.SetOut(captured);
@@ -302,6 +306,7 @@ public sealed class PipelineExecutor
                     finally
                     {
                         Console.SetOut(origOut);
+                        OutputCapture.Pop();
                     }
 
                     var output = captured.ToString();
@@ -326,6 +331,7 @@ public sealed class PipelineExecutor
                     // Function — capture output via Console.SetOut (same pattern as builtin)
                     var captured = new StringWriter();
                     var origOut = Console.Out;
+                    OutputCapture.Push();
                     try
                     {
                         Console.SetOut(captured);
@@ -334,6 +340,7 @@ public sealed class PipelineExecutor
                     finally
                     {
                         Console.SetOut(origOut);
+                        OutputCapture.Pop();
                     }
 
                     var output = captured.ToString();
@@ -429,6 +436,7 @@ public sealed class PipelineExecutor
         // Capture output via Console.SetOut
         var captured = new StringWriter();
         var originalOut = Console.Out;
+        OutputCapture.Push();
         try
         {
             Console.SetOut(captured);
@@ -446,7 +454,6 @@ public sealed class PipelineExecutor
             else
             {
                 // No stdout redirect — write to console
-                Console.SetOut(originalOut);
                 Console.Write(captured.ToString());
             }
 
@@ -455,6 +462,7 @@ public sealed class PipelineExecutor
         finally
         {
             Console.SetOut(originalOut);
+            OutputCapture.Pop();
         }
     }
 

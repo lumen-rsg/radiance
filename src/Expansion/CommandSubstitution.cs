@@ -4,6 +4,7 @@ using Radiance.Builtins;
 using Radiance.Interpreter;
 using Radiance.Lexer;
 using Radiance.Parser;
+using Radiance.Utils;
 
 namespace Radiance.Expansion;
 
@@ -173,6 +174,7 @@ public sealed class CommandSubstitution
             // Capture stdout output
             var captured = new StringWriter();
             var originalOut = Console.Out;
+            OutputCapture.Push();
 
             try
             {
@@ -187,6 +189,7 @@ public sealed class CommandSubstitution
             finally
             {
                 Console.SetOut(originalOut);
+                OutputCapture.Pop();
             }
 
             var output = captured.ToString();

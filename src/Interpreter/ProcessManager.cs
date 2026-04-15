@@ -63,7 +63,7 @@ public sealed class ProcessManager
             // "is not StreamWriter" would always be true. Instead, we check if Console.Out
             // is a StringWriter, which is the actual type set during command substitution
             // via Console.SetOut(new StringWriter()).
-            if (Console.IsOutputRedirected || Console.Out is StringWriter)
+            if (Console.IsOutputRedirected || OutputCapture.IsCapturing)
             {
                 var startInfo = BuildCapturedStartInfo(resolved, args, context);
                 using var process = new Process { StartInfo = startInfo };
