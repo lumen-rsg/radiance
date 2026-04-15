@@ -4,6 +4,7 @@ using Radiance.Builtins;
 using Radiance.Expansion;
 using Radiance.Lexer;
 using Radiance.Parser.Ast;
+using Radiance.Utils;
 
 namespace Radiance.Interpreter;
 
@@ -366,7 +367,7 @@ public sealed class PipelineExecutor
 
                     if (process is null)
                     {
-                        Console.Error.WriteLine($"radiance: command not found: {commandName}");
+                        ColorOutput.WriteError($"{commandName}: command not found");
                         lastExitCode = 127;
                         pipeData = null;
                     }
@@ -475,7 +476,7 @@ public sealed class PipelineExecutor
 
         if (process is null)
         {
-            Console.Error.WriteLine($"radiance: command not found: {commandName}");
+            ColorOutput.WriteError($"{commandName}: command not found");
             return 127;
         }
 

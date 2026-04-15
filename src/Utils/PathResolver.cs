@@ -108,6 +108,87 @@ public static class PathResolver
     }
 
     /// <summary>
+    /// Result of a PATH resolution that includes executability information.
+    /// </summary>
+    /// <param name="Path">The resolved path, or null if not found.</param>
+    /// <param name="FoundButNotExecutable">True if the file exists but is not executable.</param>
+    public record struct ResolveResult(string? Path, bool FoundButNotExecutable);
+
+    /// <summary>
+    /// Resolves a command name with additional information about whether the file
+    /// exists but is not executable (for "Permission denied" error reporting).
+    /// </summary>
+    /// <param name="commandName">The command name to resolve.</param>
+    /// <returns>A <see cref="ResolveResult"/> with the path and executability info.</returns>
+    public static ResolveResult? ResolveWithExecutability(string commandName)
+    {
+        // If it's a path, check directly
+        if (commandName.Contains('/') || commandName.Contains('\\'))
+        {
+            if (File.Exists(commandName))
+            {
+                return IsExecutable(commandName)
+                    ? new ResolveResult(commandName, false)
+                    : new ResolveResult(null, true);
+            }
+            return null;
+        }
+
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        var separator = OperatingSystem.IsWindows() ? ';' : ':';
+
+        foreach (var dir in pathEnv.Split(separator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                foreach (var ext in ExecutableExtensions)
+                {
+                    var fullPath = Path.Combine(dir, commandName + ext);
+                    if (File.Exists(fullPath))
+                    {
+                        return IsExecutable(fullPath)
+                            ? new ResolveResult(fullPath, false)
+                            : new ResolveResult(null, true);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Skip inaccessible directories
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Checks if a file is executable (has execute permission on Unix, or is .exe/.cmd/.bat/.ps1 on Windows).
+    /// </summary>
+    private static bool IsExecutable(string path)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var ext = Path.GetExtension(path).ToLowerInvariant();
+                return ext is ".exe" or ".cmd" or ".bat" or ".ps1" or "";
+            }
+
+            // On Unix: check if the file has any execute bit set
+            using var stream = File.OpenRead(path);
+            // File.Exists already confirmed it's a regular file
+            // Check Unix permissions via mono/runtime
+            var fi = new FileInfo(path);
+            // On .NET 10+ Unix, we can check the Unix file mode
+            return (fi.UnixFileMode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Checks if a command exists in the PATH.
     /// </summary>
     /// <param name="commandName">The command name to check.</param>

@@ -22,6 +22,7 @@ Input → Lexer → Tokens → Parser → AST → Interpreter → Execution
 | **AST** | `src/Parser/Ast/` | Abstract Syntax Tree node definitions |
 | **Interpreter** | `src/Interpreter/` | AST walker that executes commands |
 | **Built-ins** | `src/Builtins/` | Built-in shell commands (echo, cd, pwd, export, etc.) |
+| **Agent** | `src/Agent/` | Lira AI assistant — OpenAI-compatible API client, tools, agentic loop |
 | **Plugins** | `src/Plugins/` | Plugin interface, manager, context, and `plugin` builtin |
 | **Expansion** | `src/Expansion/` | Variable, glob, tilde, brace, and command substitution |
 | **Utils** | `src/Utils/` | Path resolution, signal handling, helpers |
@@ -93,6 +94,73 @@ Radiance/
 ```
 
 ## Changelog
+
+### [1.3.1] — Error Reporting Fix ✅
+
+**Bug Fixes:**
+
+*Command Not Found Error Reporting:*
+- **Fixed missing "command not found" error message** — when launching a nonexistent command, the shell silently returned exit code 127 without printing any error to stderr
+- Root cause: `ProcessManager.Execute()` returned 127 when `ResolveCommand()` returned null, but never wrote an error message to stderr. The error was only printed in the `PipelineExecutor` path (piped/redirected commands), not in the direct execution path (simple commands)
+- Fix: Added proper error messages in `ProcessManager.Execute()` using `ColorOutput.WriteError()` for consistent, colorized output
+
+*Permission Denied Detection:*
+- **Added "Permission denied" error (exit code 126)** — when a file exists on PATH but is not executable, or when a direct path references a non-executable file
+- New `PathResolver.ResolveWithExecutability()` method returns executability information alongside the resolved path
+- New `PathResolver.IsExecutable()` helper checks Unix file mode execute bits (`UnixFileMode.UserExecute | GroupExecute | OtherExecute`) on macOS/Linux, file extension on Windows
+- New `ResolveResult` record struct for returning path + executability info
+
+*Consistent Error Formatting:*
+- **Updated all error messages to use `ColorOutput.WriteError()`** — previously, `PipelineExecutor` and `ProcessManager` used raw `Console.Error.WriteLine()`, producing inconsistent formatting
+- All command execution errors now display with red bold "radiance: error:" prefix
+- Added `Win32Exception` catch with native error code 13 (`EACCES`) detection for permission-denied at the OS level
+
+**Modified files:**
+- `src/Interpreter/ProcessManager.cs` — added "command not found" / "Permission denied" messages, `ColorOutput` formatting, `Win32Exception` handling
+- `src/Interpreter/PipelineExecutor.cs` — switched to `ColorOutput.WriteError()` for consistency
+- `src/Utils/PathResolver.cs` — added `ResolveWithExecutability()`, `ResolveResult`, `IsExecutable()`
+
+### [1.3.0] — Lira AI Agent ✅
+
+**Added:**
+
+**Lira AI Assistant (`src/Agent/`):**
+- `AgentConfig` — Configuration model loaded from `~/.radiance/agent.json` or environment variables (`LIRA_API_KEY`, `LIRA_BASE_URL`, `LIRA_MODEL`). Supports any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM, etc.)
+- `OpenAiClient` — Full OpenAI chat completions API client with streaming SSE support, function/tool calling, and typed data models for all request/response types
+- `AgentTools` — 6 built-in tools the agent can invoke: `run_command` (CLI execution), `read_file`, `write_file`, `list_directory`, `create_directory`, `shell_info`. Includes JSON schema definitions, formatting, and confirmation gating for destructive operations
+- `LiraAgent` — The main agentic loop with streaming text output, automatic tool call processing, user y/n confirmation for commands, conversation history management, and code block rendering with syntax highlighting and line numbers
+
+**Agent Features:**
+- Streaming API responses with real-time text display
+- Fenced code block detection and rendering with ANSI syntax highlighting (keywords, strings, comments, numbers, operators)
+- Line numbers and colored borders for code blocks
+- Collapsed view for long code blocks (>20 lines, shows first/last 8 lines)
+- Tool calling with agentic loop (API can call tools, see results, and continue responding)
+- User confirmation required before executing CLI commands (y/n prompt)
+- Conversation history with configurable max length
+- In-chat slash commands: `/help`, `/exit`, `/quit`, `/reset`, `/config`, `/model`, `/history`
+
+**`agent` Builtin Command (`src/Builtins/AgentCommand.cs`):**
+- `agent` — Launch interactive Lira chat session
+- `agent config` — Show current API configuration
+- `agent setup` — Show setup instructions
+- `agent reset` — Reset conversation and start fresh
+
+**Shell Integration:**
+- Registered as a builtin command in `BuiltinRegistry.CreateDefault()`
+- Welcome banner updated: "Type 'agent' for AI help!"
+- Passes `ShellContext` to the agent for working directory awareness
+
+**New files:**
+- `src/Agent/AgentConfig.cs`
+- `src/Agent/OpenAiClient.cs`
+- `src/Agent/AgentTools.cs`
+- `src/Agent/LiraAgent.cs`
+- `src/Builtins/AgentCommand.cs`
+
+**Modified files:**
+- `src/Builtins/BuiltinRegistry.cs` — register `AgentCommand`
+- `src/Shell/RadianceShell.cs` — updated welcome message
 
 ### [1.2.5] — Theme Subcommand Bug Fix ✅
 

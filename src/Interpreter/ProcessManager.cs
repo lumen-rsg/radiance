@@ -25,7 +25,30 @@ public sealed class ProcessManager
     {
         var resolved = ResolveCommand(commandName);
         if (resolved is null)
+        {
+            // Check if the command exists as a file but is not executable (permission denied)
+            if (commandName.Contains('/') || commandName.Contains('\\'))
+            {
+                if (File.Exists(commandName))
+                {
+                    ColorOutput.WriteError($"{commandName}: Permission denied");
+                    return 126;
+                }
+            }
+            else
+            {
+                // Check if found on PATH but not executable
+                var pathResult = PathResolver.ResolveWithExecutability(commandName);
+                if (pathResult is not null && pathResult.Value.FoundButNotExecutable)
+                {
+                    ColorOutput.WriteError($"{commandName}: Permission denied");
+                    return 126;
+                }
+            }
+
+            ColorOutput.WriteError($"{commandName}: command not found");
             return 127;
+        }
 
         try
         {
@@ -59,9 +82,18 @@ public sealed class ProcessManager
                 return process.ExitCode;
             }
         }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            // Common for permission denied, command not found at OS level
+            var msg = ex.NativeErrorCode == 13  // EACCES on Unix
+                ? $"{commandName}: Permission denied"
+                : $"{commandName}: {ex.Message}";
+            ColorOutput.WriteError(msg);
+            return 126;
+        }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"radiance: error executing '{commandName}': {ex.Message}");
+            ColorOutput.WriteError($"{commandName}: {ex.Message}");
             return 126;
         }
     }
@@ -184,9 +216,17 @@ public sealed class ProcessManager
 
             return process;
         }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            var msg = ex.NativeErrorCode == 13
+                ? $"{commandName}: Permission denied"
+                : $"{commandName}: {ex.Message}";
+            ColorOutput.WriteError(msg);
+            return null;
+        }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"radiance: error executing '{commandName}': {ex.Message}");
+            ColorOutput.WriteError($"{commandName}: {ex.Message}");
             return null;
         }
     }
