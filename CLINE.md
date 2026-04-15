@@ -94,6 +94,22 @@ Radiance/
 
 ## Changelog
 
+### [1.2.5] — Theme Subcommand Bug Fix ✅
+
+**Bug Fixes:**
+
+*Theme Command Subcommand Resolution:*
+- **Fixed `theme` command always reporting "unknown subcommand 'theme'"** — running `theme`, `theme help`, `theme list`, or any `theme` subcommand would produce `theme: unknown subcommand 'theme'`
+- Root cause: `ThemeCommand.Execute()` assumed `args[0]` was the subcommand, but the builtin registry passes the full argv including the command name as `args[0]` (like C's `argv`). So `args[0]` was always `"theme"`, and the actual subcommand (`"help"`, `"list"`, etc.) was in `args[1]`
+- Fix: Updated all argument indexing in `ThemeCommand`:
+  - `Execute()`: check `args.Length <= 1` for no-subcommand case, use `args[1]` for subcommand
+  - `SetTheme()`: theme name moved from `args[1]` to `args[2]`
+  - `ShowInfo()`: theme name moved from `args[1]` to `args[2]`
+- Matches the convention already used by `RadianceCommand` (which correctly uses `args.Length > 1 ? args[1]`)
+
+**Modified files:**
+- `src/Builtins/ThemeCommand.cs` — fixed args indexing to account for command name in args[0]
+
 ### [1.2.4] — Redirection Bug Fix ✅
 
 **Bug Fixes:**

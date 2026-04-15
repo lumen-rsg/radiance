@@ -22,13 +22,13 @@ public sealed class ThemeCommand : IBuiltinCommand
 
     public int Execute(string[] args, ShellContext ctx)
     {
-        if (args.Length == 0)
+        if (args.Length <= 1)
         {
             PrintHelp();
             return 0;
         }
 
-        var subcommand = args[0].ToLowerInvariant();
+        var subcommand = args[1].ToLowerInvariant();
 
         return subcommand switch
         {
@@ -64,7 +64,7 @@ public sealed class ThemeCommand : IBuiltinCommand
 
     private int SetTheme(string[] args)
     {
-        if (args.Length < 2)
+        if (args.Length < 3)
         {
             Console.Error.WriteLine("theme set: theme name required");
             Console.Error.WriteLine("Usage: theme set <name>");
@@ -72,7 +72,7 @@ public sealed class ThemeCommand : IBuiltinCommand
             return 1;
         }
 
-        var name = args[1];
+        var name = args[2];
         if (!_themeManager.SetTheme(name))
         {
             Console.Error.WriteLine($"theme set: unknown theme '{name}'");
@@ -96,17 +96,17 @@ public sealed class ThemeCommand : IBuiltinCommand
 
     private int ShowInfo(string[] args)
     {
-        if (args.Length < 2)
+        if (args.Length < 3)
         {
             Console.Error.WriteLine("theme info: theme name required");
             Console.Error.WriteLine("Usage: theme info <name>");
             return 1;
         }
 
-        var theme = _themeManager.GetTheme(args[1]);
+        var theme = _themeManager.GetTheme(args[2]);
         if (theme == null)
         {
-            Console.Error.WriteLine($"theme info: unknown theme '{args[1]}'");
+            Console.Error.WriteLine($"theme info: unknown theme '{args[2]}'");
             return 1;
         }
 
