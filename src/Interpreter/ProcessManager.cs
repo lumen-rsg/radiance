@@ -33,7 +33,12 @@ public sealed class ProcessManager
             // via Console.SetOut), we need piped mode so external command output
             // gets captured. Otherwise, let the child inherit the terminal directly
             // for full TTY support (interactive apps like btop, vim, htop).
-            if (Console.IsOutputRedirected)
+            //
+            // Note: Console.IsOutputRedirected only detects OS-level stream redirection.
+            // Console.SetOut() changes the TextWriter but does NOT set the OS flag.
+            // We also check if Console.Out is not a StreamWriter (the default type),
+            // which catches command substitution via SetOut(new StringWriter()).
+            if (Console.IsOutputRedirected || Console.Out is not StreamWriter)
             {
                 var startInfo = BuildCapturedStartInfo(resolved, args, context);
                 using var process = new Process { StartInfo = startInfo };

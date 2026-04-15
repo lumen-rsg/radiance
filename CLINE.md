@@ -94,6 +94,23 @@ Radiance/
 
 ## Changelog
 
+### [1.2.4] — Redirection Bug Fix ✅
+
+**Bug Fixes:**
+
+*External Command Output Capture in Command Substitution:*
+- **Fixed `$(cat file)` and similar command substitutions returning empty string** — when using external commands (like `cat`, `head`, `tail`) inside `$(...)` to read back file contents written by shell redirections, the output was going directly to the terminal instead of being captured
+- Root cause: `ProcessManager.Execute()` used `Console.IsOutputRedirected` to decide between terminal-inherited mode and captured-output mode. However, `Console.IsOutputRedirected` only reflects OS-level stream redirection, NOT `Console.SetOut()` (which is what command substitution uses to capture output via `new StringWriter()`)
+- Fix: Added `Console.Out is not StreamWriter` check — the default `Console.Out` is a `StreamWriter`, but after `Console.SetOut(new StringWriter())` it becomes a `StringWriter`, so the type check correctly detects command substitution context
+- This fix ensures external command output is properly captured in all contexts: command substitution, pipelines, and script execution
+- Interactive TTY support (vim, btop, etc.) is unaffected — terminal-inherited mode still works when `Console.Out` is the default `StreamWriter`
+- Fixes stress test failures in Section 12 (Redirections): tests 12.1, 12.2, 12.4, and 12.5 now pass
+- Stress test: **198/198 tests passing** (was 194/198)
+- Unit tests: **261/261 tests passing**
+
+**Modified files:**
+- `src/Interpreter/ProcessManager.cs` — output capture detection now checks `Console.Out is not StreamWriter` in addition to `Console.IsOutputRedirected`
+
 ### [1.2.3] — Login Shell Support ✅
 
 **Added:**
