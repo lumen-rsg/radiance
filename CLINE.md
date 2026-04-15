@@ -94,6 +94,40 @@ Radiance/
 
 ## Changelog
 
+### [1.2.1] — ✨ The `radiance` Command — Sparkle Mode ✅
+
+**Added:**
+
+**`radiance` Builtin Command (`src/Builtins/RadianceCommand.cs`):**
+- `radiance` — Displays a gorgeous gradient-colored ASCII art logo with the Radiance banner
+- `radiance spark` — Triggers a sparkle cascade animation with ✦ ✧ ⋆ characters in random ANSI colors across the terminal
+- `radiance fortune` — Shows a random nerdy developer fortune cookie in a decorative box border (24 curated quotes)
+- `radiance stats` — Displays a stylish session dashboard: uptime, commands run, unique commands, top 5 commands with bar charts
+- `radiance matrix` — Matrix-style green digital rain animation (2 seconds) — "Wake up, Radiance..."
+- `radiance help` — Styled usage information
+
+**Sparkle Renderer (`src/Utils/SparkleRenderer.cs`):**
+- `SparkleRenderer` — static utility class with ANSI art rendering, sparkle animations, matrix rain, fortune display, stats dashboard
+- `SessionStats` — session statistics tracker (command count, frequency map, top commands, uptime)
+- Logo rendering with gradient ANSI colors (cyan → aqua → pink → gold)
+- Word-wrapping and box-drawing utilities
+
+**Session Statistics Tracking:**
+- `RadianceShell` tracks every command executed via `SessionStats.RecordCommand()`
+- First word of each input line extracted as command name for frequency tracking
+- Stats wired to `RadianceCommand` for the `stats` subcommand
+
+**Welcome Message Update:**
+- Welcome banner now hints at the `radiance` command: "Try 'radiance' for something fun!"
+
+**New files:**
+- `src/Utils/SparkleRenderer.cs`
+- `src/Builtins/RadianceCommand.cs`
+
+**Modified files:**
+- `src/Builtins/BuiltinRegistry.cs` — register `RadianceCommand`
+- `src/Shell/RadianceShell.cs` — session stats tracking, wire radiance command, updated welcome message
+
 ### [1.2.0] — Theming System ✅
 
 **Added:**

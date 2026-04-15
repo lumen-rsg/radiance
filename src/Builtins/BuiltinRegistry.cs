@@ -99,6 +99,7 @@ public sealed class BuiltinRegistry
         registry.Register(new SourceCommand());
         registry.Register(SourceCommand.CreateDotAlias());
         registry.Register(new ReadCommand());
+        registry.Register(new RadianceCommand());
         return registry;
     }
 }

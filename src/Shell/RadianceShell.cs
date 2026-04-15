@@ -27,6 +27,7 @@ public sealed class RadianceShell
     private readonly History _history;
     private readonly PluginManager _pluginManager;
     private readonly ThemeManager _themeManager = new();
+    private readonly SessionStats _sessionStats = new();
     private bool _running = true;
 
     /// <summary>
@@ -101,6 +102,13 @@ public sealed class RadianceShell
 
         // Register theme command
         _builtins.Register(new ThemeCommand(_themeManager));
+
+        // Wire up radiance command with session stats and version
+        if (_builtins.TryGetCommand("radiance") is RadianceCommand radianceCmd)
+        {
+            radianceCmd.Stats = _sessionStats;
+            radianceCmd.Version = Version;
+        }
     }
 
     /// <summary>
@@ -542,10 +550,25 @@ public sealed class RadianceShell
 
     /// <summary>
     /// Executes a single line of input by lexing, parsing, and interpreting.
-    /// Handles alias expansion before parsing.
+    /// Handles alias expansion before parsing. Tracks session statistics.
     /// </summary>
     private void ExecuteInput(string input)
     {
+        // Track session statistics — extract the first word as the command name
+        var trimmedInput = input.TrimStart();
+        var cmdEnd = 0;
+        while (cmdEnd < trimmedInput.Length && !char.IsWhiteSpace(trimmedInput[cmdEnd])
+               && trimmedInput[cmdEnd] != ';' && trimmedInput[cmdEnd] != '|'
+               && trimmedInput[cmdEnd] != '&')
+        {
+            cmdEnd++;
+        }
+
+        if (cmdEnd > 0)
+        {
+            _sessionStats.RecordCommand(trimmedInput[..cmdEnd]);
+        }
+
         try
         {
             // Expand aliases in the input
@@ -1459,7 +1482,7 @@ public sealed class RadianceShell
         Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{Version} ✦\x1b[1;36m      │\x1b[0m");
         Console.WriteLine("\x1b[1;36m  │  \x1b[37mA BASH interpreter in C#\x1b[1;36m       │\x1b[0m");
         Console.WriteLine("\x1b[1;36m  ╰─────────────────────────────────╯\x1b[0m");
-        Console.WriteLine("\x1b[37m  Type 'exit' to quit, 'type' to inspect commands.\x1b[0m");
+        Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try \x1b[1;33m'radiance'\x1b[0m\x1b[37m for something fun!\x1b[0m");
         Console.WriteLine();
     }
 }
