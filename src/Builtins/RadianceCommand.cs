@@ -94,20 +94,24 @@ public sealed class RadianceCommand : IBuiltinCommand
     /// </summary>
     private static void PrintHelp()
     {
-        Console.WriteLine("\x1b[1;36m  ╭────── radiance ──────╮\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m                       \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m  \x1b[1;33mUsage:\x1b[0m                \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    radiance [command]   \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m                       \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m  \x1b[1;33mCommands:\x1b[0m             \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    (none)   Show logo   \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    spark    Sparkle!    \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    fortune  Fortune 🍪   \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    stats    Session info \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    matrix   Enter Matrix \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m    help     This message \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │\x1b[0m                       \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  ╰───────────────────────╯\x1b[0m");
+        const int W = 26; // Inner width between │ borders
+        var hLine = new string('─', W);
+
+        // Header: ───────  radiance  ───────  (7+2+8+2+7 = 26 = W)
+        Console.WriteLine($"\x1b[1;36m  ╭{new string('─', 7)}  \x1b[1;33mradiance\x1b[1;36m  {new string('─', 7)}╮\x1b[0m");
+        SparkleRenderer.BoxLine(W, "");
+        SparkleRenderer.BoxLine(W, $"  \x1b[1;33mUsage:\x1b[0m");
+        SparkleRenderer.BoxLine(W, $"    radiance [command]");
+        SparkleRenderer.BoxLine(W, "");
+        SparkleRenderer.BoxLine(W, $"  \x1b[1;33mCommands:\x1b[0m");
+        SparkleRenderer.BoxLine(W, $"    (none)   Show logo");
+        SparkleRenderer.BoxLine(W, $"    spark    Sparkle!");
+        SparkleRenderer.BoxLine(W, $"    fortune  Fortune 🍪");
+        SparkleRenderer.BoxLine(W, $"    stats    Session info");
+        SparkleRenderer.BoxLine(W, $"    matrix   Enter Matrix");
+        SparkleRenderer.BoxLine(W, $"    help     This message");
+        SparkleRenderer.BoxLine(W, "");
+        Console.WriteLine($"\x1b[1;36m  ╰{hLine}╯\x1b[0m");
         Console.WriteLine();
     }
 }

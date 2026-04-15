@@ -298,24 +298,27 @@ public static class SparkleRenderer
     public static void RenderFortune()
     {
         var fortune = Fortunes[Rng.Next(Fortunes.Length)];
+        var fortuneColor = SparkleColors[Rng.Next(SparkleColors.Length)];
 
-        // Decorative cookie border
-        var maxWidth = Math.Min(fortune.Length + 4, Console.WindowWidth - 4);
+        // Calculate display width of the full text (🍪 is 2 display columns)
+        var fullText = $"🍪 {fortune}";
+        var textDisplayWidth = VisibleLength(fullText);
+        var maxWidth = Math.Min(textDisplayWidth + 4, Console.WindowWidth > 4 ? Console.WindowWidth - 4 : 76);
+        var innerWidth = maxWidth - 2;
+
         var topBottom = new string('═', maxWidth);
         var emptyLine = new string(' ', maxWidth);
-
-        var fortuneColor = SparkleColors[Rng.Next(SparkleColors.Length)];
 
         Console.WriteLine($"\x1b[1;33m  ╔{topBottom}╗\x1b[0m");
         Console.WriteLine($"\x1b[1;33m  ║{emptyLine}║\x1b[0m");
 
-        // Word-wrap the fortune
-        var innerWidth = maxWidth - 2;
-        var lines = WordWrap($"🍪 {fortune}", innerWidth);
+        // Word-wrap the fortune using display width
+        var lines = WordWrap(fullText, innerWidth);
 
         foreach (var line in lines)
         {
-            var padded = line.PadRight(innerWidth);
+            var pad = Math.Max(0, innerWidth - VisibleLength(line));
+            var padded = line + new string(' ', pad);
             Console.WriteLine($"\x1b[1;33m  ║ \x1b[0m{fortuneColor}{padded}\x1b[1;33m ║\x1b[0m");
         }
 
@@ -325,35 +328,102 @@ public static class SparkleRenderer
     }
 
     /// <summary>
-    /// Renders a stylish session stats dashboard.
+    /// Renders a stylish session stats dashboard with properly aligned borders.
     /// </summary>
     /// <param name="stats">The session statistics to display.</param>
     public static void RenderStats(SessionStats stats)
     {
+        const int W = 44; // Inner width between │ borders
         var uptime = DateTime.Now - stats.SessionStart;
+        var hLine = new string('─', W);
 
-        Console.WriteLine("\x1b[1;36m  ╭─────────── Session Stats ───────────╮\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │\x1b[0m                                      \x1b[1;36m│\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │\x1b[0m  \x1b[1;33m✦ Session Started:\x1b[0m  {stats.SessionStart:yyyy-MM-dd HH:mm:ss}  \x1b[1;36m│\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │\x1b[0m  \x1b[1;33m✦ Uptime:\x1b[0m            {FormatDuration(uptime),-19} \x1b[1;36m│\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │\x1b[0m  \x1b[1;33m✦ Commands Run:\x1b[0m       {stats.CommandCount,-19} \x1b[1;36m│\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │\x1b[0m  \x1b[1;33m✦ Unique Commands:\x1b[0m    {stats.UniqueCommands,-19} \x1b[1;36m│\x1b[0m");
+        // Header
+        Console.WriteLine($"\x1b[1;36m  ╭{hLine}╮\x1b[0m");
+        BoxLine(W, "");
+
+        // Session info
+        BoxLine(W, $"  \x1b[1;33m✦ Session Started:\x1b[0m  {stats.SessionStart:yyyy-MM-dd HH:mm:ss}");
+        BoxLine(W, $"  \x1b[1;33m✦ Uptime:\x1b[0m            {FormatDuration(uptime)}");
+        BoxLine(W, $"  \x1b[1;33m✦ Commands Run:\x1b[0m       {stats.CommandCount}");
+        BoxLine(W, $"  \x1b[1;33m✦ Unique Commands:\x1b[0m    {stats.UniqueCommands}");
 
         if (stats.TopCommands.Count > 0)
         {
-            Console.WriteLine($"\x1b[1;36m  │\x1b[0m                                      \x1b[1;36m│\x1b[0m");
-            Console.WriteLine($"\x1b[1;36m  │\x1b[0m  \x1b[1;37m── Top Commands ──\x1b[0m                 \x1b[1;36m│\x1b[0m");
+            BoxLine(W, "");
+            BoxLine(W, $"  \x1b[1;37m── Top Commands ──\x1b[0m");
             foreach (var (cmd, count) in stats.TopCommands)
             {
                 var bar = new string('█', Math.Min(count, 20));
                 var label = cmd.Length > 10 ? cmd[..10] + "…" : cmd;
-                Console.WriteLine($"\x1b[1;36m  │\x1b[0m  \x1b[38;5;213m{label,-11}\x1b[0m \x1b[1;33m{bar}\x1b[0m {count,3}             \x1b[1;36m│\x1b[0m");
+                BoxLine(W, $"  \x1b[38;5;213m{label,-11}\x1b[0m \x1b[1;33m{bar}\x1b[0m {count,3}");
             }
         }
 
-        Console.WriteLine($"\x1b[1;36m  │\x1b[0m                                      \x1b[1;36m│\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  ╰─────────────────────────────────────╯\x1b[0m");
+        BoxLine(W, "");
+
+        // Footer
+        Console.WriteLine($"\x1b[1;36m  ╰{hLine}╯\x1b[0m");
         Console.WriteLine();
+    }
+
+    /// <summary>
+    /// Writes a single line inside a box border, right-padding to the given width.
+    /// ANSI escape codes in <paramref name="content"/> are not counted as visible characters.
+    /// Uses the default border color (cyan).
+    /// </summary>
+    internal static void BoxLine(int width, string content)
+    {
+        BoxLine(width, content, "\x1b[1;36m");
+    }
+
+    /// <summary>
+    /// Writes a single line inside a box border with a specified border color,
+    /// right-padding to the given width.
+    /// ANSI escape codes in <paramref name="content"/> are not counted as visible characters.
+    /// </summary>
+    internal static void BoxLine(int width, string content, string borderColor)
+    {
+        var pad = Math.Max(0, width - VisibleLength(content));
+        Console.WriteLine($"{borderColor}  │\x1b[0m{content}{new string(' ', pad)}{borderColor}│\x1b[0m");
+    }
+
+    /// <summary>
+    /// Computes the visible (display-column) length of a string,
+    /// ignoring ANSI escape sequences and counting surrogate pairs as 2 columns.
+    /// </summary>
+    internal static int VisibleLength(string text)
+    {
+        var len = 0;
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (text[i] == '\x1b')
+            {
+                // Skip ANSI escape sequence (\x1b[ ... m)
+                i++;
+                if (i < text.Length && text[i] == '[')
+                {
+                    i++;
+                    while (i < text.Length && text[i] != 'm')
+                        i++;
+                    if (i < text.Length) i++;
+                }
+                continue;
+            }
+
+            if (char.IsHighSurrogate(text[i]))
+            {
+                // Surrogate pair — emoji etc., count as 2 display columns
+                i += 2;
+                len += 2;
+            }
+            else
+            {
+                i++;
+                len++;
+            }
+        }
+        return len;
     }
 
     /// <summary>

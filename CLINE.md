@@ -95,6 +95,29 @@ Radiance/
 
 ## Changelog
 
+### [1.3.2] — Command Output Formatting Fix ✅
+
+**Bug Fixes:**
+
+*Box Drawing Alignment in `radiance stats`, `radiance help`, `radiance fortune`:*
+- **Fixed broken table borders in `radiance stats`** — box rows had mismatched widths because content lines overflowed the declared inner width by 5+ columns. The `│` right border was pushed out of alignment, producing a jagged right edge
+- Root cause: All content lines used hardcoded space padding that didn't account for ANSI escape codes or variable-length data. The declared inner width was 38 but content was 43-44 chars
+- **Fixed broken table borders in `radiance help`** — same issue with 2-3 column overflow on every content line
+- **Fixed emoji display width in `radiance fortune`** — the 🍪 emoji is 2 display columns wide but was counted as 1, causing box misalignment
+
+*New Utility Methods (`SparkleRenderer`):*
+- `VisibleLength(string)` — computes display-column length of a string, properly ignoring ANSI escape sequences and counting surrogate pairs (emoji) as 2 columns
+- `BoxLine(int width, string content)` — writes a single line inside `│` borders with automatic right-padding based on visible length. Made `internal` for reuse across builtin commands
+
+*Approach:*
+- `RenderStats()` — widened inner box to 44 columns, replaced all hardcoded padding with `BoxLine()` calls that dynamically compute trailing padding
+- `RenderFortune()` — now uses `VisibleLength()` for display width calculations and dynamic padding
+- `PrintHelp()` in `RadianceCommand` — widened inner box to 26 columns, switched to `BoxLine()` for all content lines
+
+**Modified files:**
+- `src/Utils/SparkleRenderer.cs` — rewrote `RenderStats()` with `BoxLine()`, updated `RenderFortune()` with `VisibleLength()`, added `BoxLine()` and `VisibleLength()` utility methods
+- `src/Builtins/RadianceCommand.cs` — rewrote `PrintHelp()` with `BoxLine()` and proper header alignment
+
 ### [1.3.1] — Error Reporting Fix ✅
 
 **Bug Fixes:**
