@@ -239,6 +239,23 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             return exitCode;
         }
 
+        // Try script file execution (for commands like ./script.sh with shebang)
+        if (commandName.Contains('/') && _context.ScriptFileExecutor is not null)
+        {
+            var resolvedPath = commandName;
+            if (!Path.IsPathRooted(resolvedPath))
+                resolvedPath = Path.GetFullPath(Path.Combine(_context.CurrentDirectory, resolvedPath));
+
+            if (File.Exists(resolvedPath) && TryReadShebang(resolvedPath, out var shebang))
+            {
+                // If shebang references radiance, bash, or sh → execute internally
+                if (shebang.Contains("radiance") || shebang.Contains("bash") || shebang.Contains("/sh"))
+                {
+                    return _context.ScriptFileExecutor(resolvedPath, args);
+                }
+            }
+        }
+
         // Try external command
         exitCode = _processManager.Execute(commandName, args, _context);
         return exitCode;
@@ -622,6 +639,34 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     internal string ExpandVariables(string input)
     {
         return _expander.ExpandString(input);
+    }
+
+    /// <summary>
+    /// Reads the shebang line (#!) from a file if present.
+    /// Returns true if the file starts with #!, false otherwise.
+    /// </summary>
+    /// <param name="path">The file path to read.</param>
+    /// <param name="shebang">The shebang line content (without the #! prefix and leading whitespace).</param>
+    /// <returns>True if a shebang was found.</returns>
+    private static bool TryReadShebang(string path, out string shebang)
+    {
+        shebang = string.Empty;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 256);
+            using var reader = new StreamReader(stream);
+            var firstLine = reader.ReadLine();
+            if (firstLine is not null && firstLine.StartsWith("#!"))
+            {
+                shebang = firstLine[2..].TrimStart();
+                return true;
+            }
+        }
+        catch
+        {
+            // Ignore file access errors — fall through to external execution
+        }
+        return false;
     }
 
     /// <summary>

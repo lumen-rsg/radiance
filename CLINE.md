@@ -94,6 +94,22 @@ Radiance/
 
 ## Changelog
 
+### [1.1.1] — Script Execution Bug Fix ✅
+
+**Bug Fixes:**
+
+*Shebang Script Execution:*
+- **Fixed `./script.sh` failing with "No such file or directory"** — when running a script with `#!/bin/bash` (or similar shebang referencing `bash`/`sh`) from within the Radiance shell, the shell correctly detects and executes it internally instead of trying to spawn `bash` as an external process (which may not exist at `/bin/bash` on macOS)
+- Root cause: `ProcessManager` used `Process.Start()` with `UseShellExecute=true`, which failed because the shebang interpreter (`/bin/bash`) didn't exist as a runnable process. Radiance is a BASH-compatible shell and should handle `#!/bin/bash` scripts internally
+- Fix: Added shebang detection in `ShellInterpreter.VisitSimpleCommand()` — when a command contains `/` (indicating a path), the interpreter reads the shebang line. If it references `radiance`, `bash`, or `/sh`, the script is executed internally via the new `ScriptFileExecutor` callback
+- New `ShellContext.ScriptFileExecutor` callback property — wired to `RadianceShell.ExecuteScript()` for in-process script execution
+- New `TryReadShebang()` helper in `ShellInterpreter` — efficiently reads the first line of a file to extract the shebang interpreter path
+
+**Modified files:**
+- `src/Interpreter/ExecutionCtx.cs` — added `ScriptFileExecutor` callback property
+- `src/Interpreter/Interpreter.cs` — shebang detection in `VisitSimpleCommand()`, `TryReadShebang()` helper
+- `src/Shell/RadianceShell.cs` — wired `ScriptFileExecutor` callback in constructor
+
 ### [1.1.0] — Plugin System ✅
 
 **Added:**

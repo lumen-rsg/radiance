@@ -86,6 +86,9 @@ public sealed class RadianceShell
         // Wire up the script executor callback for the source builtin
         _context.ScriptExecutor = ExecuteInContext;
 
+        // Wire up script file executor callback for shebang script execution
+        _context.ScriptFileExecutor = ExecuteScript;
+
         // Initialize plugin system
         _pluginManager = new PluginManager(_context, _builtins);
         var pluginCmd = new PluginCommand { Manager = _pluginManager };

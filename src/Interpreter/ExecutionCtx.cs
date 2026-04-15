@@ -110,6 +110,14 @@ public sealed class ShellContext
     /// </summary>
     public Func<string, string[], int>? ScriptExecutor { get; set; }
 
+    /// <summary>
+    /// Callback for executing a script file (with shebang handling) as an external command.
+    /// Used when the interpreter encounters a script file that should be executed internally
+    /// (e.g., when the shebang references <c>radiance</c> or <c>bash</c>).
+    /// Parameters: script path, arguments array. Returns exit code.
+    /// </summary>
+    public Func<string, string[], int>? ScriptFileExecutor { get; set; }
+
     // ──── Variable Access (scope-aware) ────
 
     /// <summary>
