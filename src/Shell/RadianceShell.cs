@@ -98,6 +98,8 @@ public sealed class RadianceShell
     /// <summary>
     /// Starts the interactive REPL loop.
     /// Loads history and sources config before starting.
+    /// When stdin is redirected (piped input), reads lines via Console.ReadLine
+    /// instead of Console.ReadKey to avoid InvalidOperationException.
     /// </summary>
     /// <returns>The final exit code.</returns>
     public int Run()
@@ -113,6 +115,8 @@ public sealed class RadianceShell
 
         PrintWelcome();
 
+        var isInputRedirected = Console.IsInputRedirected;
+
         while (_running)
         {
             // Check for completed background jobs
@@ -123,7 +127,15 @@ public sealed class RadianceShell
             Console.Write(prompt);
 
             // Read input (possibly multi-line)
-            var input = ReadMultiLineInput(prompt);
+            string? input;
+            if (isInputRedirected)
+            {
+                input = ReadLineRedirected();
+            }
+            else
+            {
+                input = ReadMultiLineInput(prompt);
+            }
 
             if (input is null)
             {
@@ -148,6 +160,44 @@ public sealed class RadianceShell
         _pluginManager.UnloadAll();
 
         return _context.LastExitCode;
+    }
+
+    /// <summary>
+    /// Reads a line from redirected stdin (pipe mode).
+    /// Returns null on EOF. Handles multi-line block constructs.
+    /// </summary>
+    private string? ReadLineRedirected()
+    {
+        var sb = new StringBuilder();
+        var firstLine = Console.ReadLine();
+
+        if (firstLine is null)
+            return null;
+
+        sb.Append(firstLine);
+
+        // Check if we need more input (unclosed blocks)
+        var blockStack = ComputeBlockStack(firstLine);
+
+        while (blockStack.Count > 0)
+        {
+            Console.Write("> ");
+            var continuation = Console.ReadLine();
+
+            if (continuation is null)
+            {
+                Console.WriteLine();
+                break;
+            }
+
+            sb.Append('\n');
+            sb.Append(continuation);
+
+            var newStack = ComputeBlockStack(continuation, blockStack);
+            blockStack = newStack;
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
