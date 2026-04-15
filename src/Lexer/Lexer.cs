@@ -152,6 +152,13 @@ public sealed class Lexer
                 return token;
             }
 
+            if (Peek(1) == '&')
+            {
+                var token = MakeToken(TokenType.AmpersandGreaterThan, ">&");
+                Advance(); Advance();
+                return token;
+            }
+
             {
                 var token = MakeToken(TokenType.GreaterThan, ">");
                 Advance();

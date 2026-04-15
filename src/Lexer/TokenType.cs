@@ -32,6 +32,9 @@ public enum TokenType
     /// <summary>Redirect stderr: 2></summary>
     RedirectStderr,
 
+    /// <summary>Duplicate file descriptor redirect: >& (e.g., 2>&1)</summary>
+    AmpersandGreaterThan,
+
     /// <summary>Background operator: &</summary>
     Ampersand,
 

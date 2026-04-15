@@ -669,12 +669,15 @@ public sealed class Parser
             words.Add(wordParts);
         }
 
-        // Collect redirections
+        // Collect redirections (with optional fd prefix like 2> or 2>&1)
+        var pendingFd = ExtractFdPrefixFromWords(words);
+
         while (IsRedirectOperator())
         {
-            var redirect = ParseRedirect();
+            var redirect = ParseRedirect(pendingFd);
             if (redirect is not null)
                 redirects.Add(redirect);
+            pendingFd = -1; // only the first redirect gets the fd prefix
         }
 
         return new SimpleCommandNode
@@ -683,6 +686,31 @@ public sealed class Parser
             Words = words,
             Redirects = redirects
         };
+    }
+
+    /// <summary>
+    /// Checks if the last collected word is an fd number prefix (e.g., "2" in "2>&1")
+    /// and if so, removes it from the words list. Returns the fd number, or -1 if none.
+    /// </summary>
+    private int ExtractFdPrefixFromWords(List<List<WordPart>> words)
+    {
+        if (words.Count == 0)
+            return -1;
+
+        var lastWord = words[^1];
+        if (lastWord.Count != 1 || lastWord[0].Quoting != WordQuoting.None)
+            return -1;
+
+        if (!int.TryParse(lastWord[0].Text, out var fd))
+            return -1;
+
+        // The next token must be a redirect operator
+        if (!IsRedirectOperator())
+            return -1;
+
+        // Remove the fd prefix from words
+        words.RemoveAt(words.Count - 1);
+        return fd;
     }
 
     /// <summary>
@@ -761,10 +789,42 @@ public sealed class Parser
 
     /// <summary>
     /// Parses a single I/O redirection.
+    /// Handles file redirects (>file, <file, >>file) and fd-duplication redirects (>&N).
     /// </summary>
-    private RedirectNode? ParseRedirect()
+    private RedirectNode? ParseRedirect(int fdOverride = -1)
     {
         var opToken = Advance();
+
+        // Determine the source file descriptor: use fd prefix if provided,
+        // otherwise default from operator type
+        var fd = fdOverride >= 0
+            ? fdOverride
+            : opToken.Type switch
+            {
+                TokenType.LessThan => 0,
+                _ => 1
+            };
+
+        // Handle fd-duplication redirect: >&N (e.g., 2>&1)
+        if (opToken.Type == TokenType.AmpersandGreaterThan)
+        {
+            if (!IsWordToken())
+            {
+                ReportError($"expected file descriptor after '>&', got {Current().Type}");
+                return null;
+            }
+
+            var targetParts = CollectWordParts();
+            var targetText = string.Join("", targetParts.Select(p => p.Text));
+
+            if (!int.TryParse(targetText, out var targetFd))
+            {
+                ReportError($"expected file descriptor number after '>&', got '{targetText}'");
+                return null;
+            }
+
+            return new RedirectNode(opToken.Type, null, fd, targetFd);
+        }
 
         if (!IsWordToken())
         {
@@ -773,15 +833,9 @@ public sealed class Parser
         }
 
         // Build word parts for the redirect target (supports quoting)
-        var targetParts = CollectWordParts();
+        var targetParts2 = CollectWordParts();
 
-        var fd = opToken.Type switch
-        {
-            TokenType.LessThan => 0,
-            _ => 1
-        };
-
-        return new RedirectNode(opToken.Type, targetParts, fd);
+        return new RedirectNode(opToken.Type, targetParts2, fd);
     }
 
     // ──── Compound List Helper ────
@@ -909,7 +963,25 @@ public sealed class Parser
     /// </summary>
     private bool IsRedirectOperator() =>
         Current().Type is TokenType.GreaterThan or TokenType.DoubleGreaterThan
-            or TokenType.LessThan;
+            or TokenType.LessThan or TokenType.AmpersandGreaterThan;
+
+    /// <summary>
+    /// Checks if the last collected word is a single digit and the next token
+    /// is a redirect operator. This detects fd-prefixed redirects like 2>, 2>> or 2>&1.
+    /// </summary>
+    private bool IsFdRedirectPrefix(List<List<WordPart>> words)
+    {
+        if (words.Count == 0)
+            return false;
+
+        var lastWord = words[^1];
+        if (lastWord.Count != 1 || lastWord[0].Quoting != WordQuoting.None)
+            return false;
+
+        return int.TryParse(lastWord[0].Text, out _) &&
+               Lookahead(1)?.Type is TokenType.GreaterThan or TokenType.DoubleGreaterThan
+                   or TokenType.AmpersandGreaterThan;
+    }
 
     /// <summary>
     /// Returns the current token without advancing.

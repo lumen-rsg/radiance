@@ -95,6 +95,34 @@ Radiance/
 
 ## Changelog
 
+### [1.3.4] — File Descriptor Redirection (`2>&1`) ✅
+
+**Added:**
+
+*File Descriptor Duplication (`>&`):*
+- **Added support for `2>&1` and similar fd-duplication redirects** — the `>&` operator duplicates one file descriptor onto another (e.g., `2>&1` merges stderr into stdout)
+- New `AmpersandGreaterThan` token type in lexer — `>&` is tokenized as a single operator (not `>` + `&`)
+- Lexer recognizes `>` followed by `&` as `AmpersandGreaterThan` before checking standalone `>`
+- Updated `RedirectNode` with `DuplicateTargetFd` parameter — stores the target fd number for `>&N` redirects, and `Target` is null for fd-dup redirects
+
+*Parser fd-Prefix Detection:*
+- New `ExtractFdPrefixFromWords()` method — detects when the last word in a command is actually an fd number prefix (e.g., `2` in `which dotnet 2>&1`). Removes it from the command words and passes it to `ParseRedirect` as the fd override
+- `ParseRedirect` accepts `fdOverride` parameter — uses the extracted fd prefix (e.g., 2) instead of the default (0 for `<`, 1 for `>`)
+
+*Stderr-to-Stdout Merging:*
+- `PipelineExecutor.HasStderrToStdoutRedirect()` — detects `2>&1` redirects in command nodes
+- External commands: creates a merged `MemoryStream` for both stdout and stderr, writes combined output to console after process exits
+- Builtin commands: captures both `Console.Out` and `Console.Error` into the same `StringWriter`
+- Function commands: redirects both `Console.Out` and `Console.Error` into the same `StringWriter`
+
+**Modified files:**
+- `src/Lexer/TokenType.cs` — added `AmpersandGreaterThan` token type
+- `src/Lexer/Lexer.cs` — tokenize `>&` as `AmpersandGreaterThan`
+- `src/Parser/Ast/RedirectNode.cs` — added `DuplicateTargetFd` parameter, made `Target` nullable
+- `src/Parser/Parser.cs` — `ExtractFdPrefixFromWords()`, updated `ParseRedirect()` with fd override, `IsRedirectOperator()` includes `AmpersandGreaterThan`
+- `src/Interpreter/PipelineExecutor.cs` — stderr/stdout merging for external/builtin/function commands, `HasStderrToStdoutRedirect()`
+- `src/Interpreter/ProcessManager.cs` — `StartProcess` handles `stderrStream` parameter for fd-dup redirects
+
 ### [1.3.3] — TTY Fix for Interactive Commands ✅
 
 **Bug Fixes:**

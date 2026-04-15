@@ -85,14 +85,16 @@ public sealed class PipelineExecutor
 
     /// <summary>
     /// Executes a single simple command with its file redirections applied.
+    /// Supports file redirects, fd-duplication redirects (2>&1), and combinations.
     /// </summary>
     private int ExecuteSingleSimpleWithRedirects(SimpleCommandNode cmd)
     {
         // Resolve redirects (expand redirect target paths)
         var stdinFile = GetStdinRedirect(cmd);
         var stdoutRedirect = GetStdoutRedirect(cmd);
+        var hasStderrToStdout = HasStderrToStdoutRedirect(cmd);
 
-        if (stdinFile is null && stdoutRedirect is null)
+        if (stdinFile is null && stdoutRedirect is null && !hasStderrToStdout)
         {
             // No redirects — delegate to interpreter directly
             return _interpreter.VisitSimpleCommand(cmd);
@@ -140,17 +142,21 @@ public sealed class PipelineExecutor
             // Check if it's a builtin
             if (_builtins.IsBuiltin(commandName))
             {
-                exitCode = ExecuteBuiltinWithRedirects(cmd, expandedWords.ToArray(), stdinStream, stdoutStream);
+                exitCode = ExecuteBuiltinWithRedirects(cmd, expandedWords.ToArray(), stdinStream, stdoutStream, hasStderrToStdout);
             }
             else if (_context.HasFunction(commandName))
             {
                 // Function with redirects — capture output via Console.SetOut
                 var captured = new StringWriter();
                 var originalOut = Console.Out;
+                var originalError = Console.Error;
                 OutputCapture.Push();
                 try
                 {
                     Console.SetOut(captured);
+                    if (hasStderrToStdout)
+                        Console.SetError(captured);
+
                     exitCode = _interpreter.ExecuteFunction(commandName, expandedWords);
 
                     var output = captured.ToString();
@@ -168,12 +174,14 @@ public sealed class PipelineExecutor
                 finally
                 {
                     Console.SetOut(originalOut);
+                    Console.SetError(originalError);
                     OutputCapture.Pop();
                 }
             }
             else
             {
-                exitCode = ExecuteExternalWithRedirects(commandName, expandedWords.ToArray(), stdinStream, stdoutStream);
+                exitCode = ExecuteExternalWithRedirects(
+                    commandName, expandedWords.ToArray(), stdinStream, stdoutStream, hasStderrToStdout);
             }
         }
         catch (FileNotFoundException ex)
@@ -422,11 +430,12 @@ public sealed class PipelineExecutor
         SimpleCommandNode cmd,
         string[] expandedWords,
         Stream? stdinStream,
-        Stream? stdoutStream)
+        Stream? stdoutStream,
+        bool mergeStderr = false)
     {
         var commandName = expandedWords[0];
 
-        if (stdoutStream is null && stdinStream is null)
+        if (stdoutStream is null && stdinStream is null && !mergeStderr)
         {
             // No redirects — execute normally
             _ = _builtins.TryExecute(commandName, expandedWords, _context, out var exitCode);
@@ -436,10 +445,13 @@ public sealed class PipelineExecutor
         // Capture output via Console.SetOut
         var captured = new StringWriter();
         var originalOut = Console.Out;
+        var originalError = Console.Error;
         OutputCapture.Push();
         try
         {
             Console.SetOut(captured);
+            if (mergeStderr)
+                Console.SetError(captured);
 
             _ = _builtins.TryExecute(commandName, expandedWords, _context, out var exitCode);
 
@@ -462,35 +474,71 @@ public sealed class PipelineExecutor
         finally
         {
             Console.SetOut(originalOut);
+            Console.SetError(originalError);
             OutputCapture.Pop();
         }
     }
 
     /// <summary>
     /// Executes an external command with optional file redirections.
+    /// When <paramref name="mergeStderr"/> is true, stderr is redirected to the
+    /// same destination as stdout (2>&1).
     /// </summary>
     private int ExecuteExternalWithRedirects(
         string commandName,
         string[] expandedWords,
         Stream? stdinStream,
-        Stream? stdoutStream)
+        Stream? stdoutStream,
+        bool mergeStderr = false)
     {
+        // When 2>&1 is requested but there's no file redirect, we need to
+        // capture both stdout and stderr into a single MemoryStream, then
+        // write the merged output to the console.
+        Stream? effectiveStdout = stdoutStream;
+        Stream? effectiveStderr = null;
+        MemoryStream? mergedStream = null;
+
+        if (mergeStderr && stdoutStream is null)
+        {
+            mergedStream = new MemoryStream();
+            effectiveStdout = mergedStream;
+            effectiveStderr = mergedStream;
+        }
+        else if (mergeStderr)
+        {
+            effectiveStderr = stdoutStream;
+        }
+
         var process = _processManager.StartProcess(
             commandName,
             expandedWords,
             _context,
             stdinStream,
-            stdoutStream);
+            effectiveStdout,
+            stderrStream: effectiveStderr,
+            wireStdoutAsync: effectiveStdout is null);
 
         if (process is null)
         {
             ColorOutput.WriteError($"{commandName}: command not found");
+            mergedStream?.Dispose();
             return 127;
         }
 
         process.WaitForExit();
         var exitCode = process.ExitCode;
         process.Dispose();
+
+        // If we merged stderr into a MemoryStream (2>&1 with no file redirect),
+        // write the combined output to the console
+        if (mergedStream is not null)
+        {
+            var output = System.Text.Encoding.UTF8.GetString(mergedStream.ToArray());
+            if (!string.IsNullOrEmpty(output))
+                Console.Write(output);
+            mergedStream.Dispose();
+        }
+
         return exitCode;
     }
 
@@ -523,7 +571,7 @@ public sealed class PipelineExecutor
             return null;
 
         // Expand the redirect target word parts
-        var expanded = _expander.ExpandWord(redirect.Target);
+        var expanded = _expander.ExpandWord(redirect.Target!);
         return expanded.Count > 0 ? expanded[0] : null;
     }
 
@@ -539,11 +587,21 @@ public sealed class PipelineExecutor
             return null;
 
         // Expand the redirect target word parts
-        var expanded = _expander.ExpandWord(redirect.Target);
+        var expanded = _expander.ExpandWord(redirect.Target!);
         if (expanded.Count == 0)
             return null;
 
         var append = redirect.RedirectType == TokenType.DoubleGreaterThan;
         return (expanded[0], append);
+    }
+
+    /// <summary>
+    /// Checks if the command has a 2>&1 redirect (stderr to stdout).
+    /// </summary>
+    private static bool HasStderrToStdoutRedirect(SimpleCommandNode cmd)
+    {
+        return cmd.Redirects.Any(r =>
+            r.RedirectType == TokenType.AmpersandGreaterThan &&
+            r.DuplicateTargetFd == 1);
     }
 }

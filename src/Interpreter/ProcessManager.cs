@@ -208,13 +208,30 @@ public sealed class ProcessManager
                 };
             }
 
-            // Wire up stderr — always forward to console
-            process.BeginErrorReadLine();
-            process.ErrorDataReceived += (_, e) =>
+            // Wire up stderr — merge with stdout stream if requested (2>&1), otherwise forward to console
+            if (stderrStream is MemoryStream stderrMs)
             {
-                if (e.Data is not null)
-                    Console.Error.WriteLine(e.Data);
-            };
+                // Merge stderr into the MemoryStream — read synchronously
+                try
+                {
+                    process.StandardError.BaseStream.CopyTo(stderrMs);
+                }
+                catch (IOException) { /* broken pipe */ }
+                catch (ObjectDisposedException) { /* disposed */ }
+            }
+            else if (stderrStream is not null)
+            {
+                _ = CopyReaderToStreamAsync(process.StandardError.BaseStream, stderrStream);
+            }
+            else
+            {
+                process.BeginErrorReadLine();
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    if (e.Data is not null)
+                        Console.Error.WriteLine(e.Data);
+                };
+            }
 
             return process;
         }
