@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -22,6 +23,11 @@ namespace Radiance.Expansion;
 /// </summary>
 public sealed class GlobExpander
 {
+    /// <summary>
+    /// Cache of compiled glob-to-regex patterns to avoid recompilation.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, Regex> RegexCache = new();
+
     /// <summary>
     /// Expands glob patterns in the given text, returning one or more matching filenames.
     /// If no glob characters are present or no matches are found, returns a single-element
@@ -242,6 +248,7 @@ public sealed class GlobExpander
 
         sb.Append('$');
 
-        return new Regex(sb.ToString(), RegexOptions.Compiled);
+        var patternStr = sb.ToString();
+        return RegexCache.GetOrAdd(pattern, _ => new Regex(patternStr, RegexOptions.None));
     }
 }

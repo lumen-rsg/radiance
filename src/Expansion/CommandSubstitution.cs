@@ -20,6 +20,7 @@ public sealed class CommandSubstitution
     private readonly ShellContext _context;
     private readonly BuiltinRegistry _builtins;
     private readonly ProcessManager _processManager;
+    private readonly Expander? _sharedExpander;
 
     /// <summary>
     /// Creates a new command substitution expander.
@@ -27,11 +28,13 @@ public sealed class CommandSubstitution
     /// <param name="context">The shell execution context.</param>
     /// <param name="builtins">The builtin command registry.</param>
     /// <param name="processManager">The external process manager.</param>
-    public CommandSubstitution(ShellContext context, BuiltinRegistry builtins, ProcessManager processManager)
+    /// <param name="sharedExpander">Optional shared expander to reuse in nested interpreters.</param>
+    public CommandSubstitution(ShellContext context, BuiltinRegistry builtins, ProcessManager processManager, Expander? sharedExpander = null)
     {
         _context = context;
         _builtins = builtins;
         _processManager = processManager;
+        _sharedExpander = sharedExpander;
     }
 
     /// <summary>
@@ -175,7 +178,10 @@ public sealed class CommandSubstitution
             {
                 Console.SetOut(captured);
 
-                var interpreter = new ShellInterpreter(_context, _builtins, _processManager);
+                // Reuse the shared expander to avoid creating a new object chain per substitution
+                var interpreter = _sharedExpander is not null
+                    ? new ShellInterpreter(_context, _builtins, _processManager, _sharedExpander)
+                    : new ShellInterpreter(_context, _builtins, _processManager);
                 _context.LastExitCode = interpreter.Execute(ast);
             }
             finally

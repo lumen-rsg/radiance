@@ -496,6 +496,11 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     }
 
     /// <summary>
+    /// Cache of case-pattern regex objects to avoid recompilation.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> CaseRegexCache = new();
+
+    /// <summary>
     /// Matches a string against a case pattern using glob-style matching.
     /// Supports *, ?, and [...] character classes.
     /// </summary>
@@ -512,16 +517,20 @@ public sealed class ShellInterpreter : IAstVisitor<int>
         if (pattern == "*")
             return true;
 
-        // Convert glob pattern to regex
-        var regex = GlobToRegex(pattern);
-        return Regex.IsMatch(value, $"^{regex}$", RegexOptions.IgnoreCase);
+        // Convert glob pattern to cached regex
+        var regex = CaseRegexCache.GetOrAdd(pattern, p =>
+        {
+            var patternStr = CaseGlobToRegex(p);
+            return new Regex($"^{patternStr}$", RegexOptions.IgnoreCase);
+        });
+        return regex.IsMatch(value);
     }
 
     /// <summary>
     /// Converts a glob pattern to a regex pattern string.
     /// Reuses the same logic as <see cref="GlobExpander"/> but for case matching.
     /// </summary>
-    private static string GlobToRegex(string pattern)
+    private static string CaseGlobToRegex(string pattern)
     {
         var result = new System.Text.StringBuilder();
         foreach (var c in pattern)

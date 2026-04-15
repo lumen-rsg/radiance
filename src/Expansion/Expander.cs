@@ -34,7 +34,7 @@ public sealed class Expander
     public Expander(ShellContext context, BuiltinRegistry builtins, ProcessManager processManager)
     {
         _context = context;
-        _commandSubstitution = new CommandSubstitution(context, builtins, processManager);
+        _commandSubstitution = new CommandSubstitution(context, builtins, processManager, this);
         _arithmeticExpander = new ArithmeticExpander(context);
     }
 
@@ -135,11 +135,32 @@ public sealed class Expander
     }
 
     /// <summary>
+    /// Checks if a string contains any expansion characters that require processing.
+    /// If none are present, the string can be returned as-is without running through
+    /// the full expansion pipeline.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static bool NeedsExpansion(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '$' || c == '`')
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Expands a double-quoted part: variable expansion, command substitution, arithmetic.
     /// No tilde or glob expansion.
     /// </summary>
     private string ExpandPartDoubleQuoted(string text)
     {
+        // Fast path: skip expansion pipeline for trivial strings
+        if (!NeedsExpansion(text))
+            return text;
+
         // Command substitution first (so variables inside $(...) are resolved)
         var result = _commandSubstitution.Expand(text);
 
@@ -161,6 +182,10 @@ public sealed class Expander
     /// </summary>
     private string ExpandPartUnquoted(string text)
     {
+        // Fast path: skip expansion pipeline for trivial strings
+        if (!NeedsExpansion(text))
+            return text;
+
         // Command substitution first
         var result = _commandSubstitution.Expand(text);
 
