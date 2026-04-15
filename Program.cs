@@ -5,12 +5,13 @@ namespace Radiance;
 
 /// <summary>
 /// Entry point for the Radiance shell.
-/// Supports interactive mode, script file execution, and inline command execution.
+/// Supports interactive mode, login shell mode, script file execution, and inline command execution.
 /// </summary>
 /// <remarks>
 /// Usage:
 /// <list type="bullet">
 /// <item><c>radiance</c> — launch interactive REPL</item>
+/// <item><c>radiance -l</c> / <c>radiance --login</c> — launch as login shell</item>
 /// <item><c>radiance script.sh [args...]</c> — execute a script file</item>
 /// <item><c>radiance -c "command" [args...]</c> — execute an inline command</item>
 /// <item><c>radiance --help</c> — show usage information</item>
@@ -19,14 +20,28 @@ namespace Radiance;
 /// </remarks>
 public static class Program
 {
-    private const string Version = "0.7.5";
+    private const string Version = "1.2.3";
 
     public static int Main(string[] args)
     {
-        // Handle --help and --version
-        if (args.Length > 0)
+        var isLoginShell = false;
+
+        // Detect login shell: argv[0] starts with '-' (e.g., -radiance) or -l/--login flag
+        if (args.Length == 0 && Environment.GetCommandLineArgs().Length > 0)
         {
-            switch (args[0])
+            var arg0 = Environment.GetCommandLineArgs()[0];
+            var exeName = Path.GetFileName(arg0);
+            if (exeName.StartsWith('-'))
+            {
+                isLoginShell = true;
+            }
+        }
+
+        // Parse flags
+        var filteredArgs = new List<string>();
+        for (var i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
             {
                 case "--help":
                 case "-h":
@@ -37,8 +52,48 @@ public static class Program
                 case "-v":
                     Console.WriteLine($"Radiance Shell v{Version}");
                     return 0;
+
+                case "--login":
+                case "-l":
+                    isLoginShell = true;
+                    break;
+
+                default:
+                    // Handle combined flags like -il, -lv, etc.
+                    if (args[i].Length > 1 && args[i][0] == '-' && args[i][1] != '-')
+                    {
+                        var flags = args[i][1..];
+                        var consumed = false;
+                        foreach (var flag in flags)
+                        {
+                            switch (flag)
+                            {
+                                case 'l':
+                                    isLoginShell = true;
+                                    consumed = true;
+                                    break;
+                                case 'h':
+                                    PrintUsage();
+                                    return 0;
+                                case 'v':
+                                    Console.WriteLine($"Radiance Shell v{Version}");
+                                    return 0;
+                            }
+                        }
+
+                        if (consumed && flags.All(f => f is 'l' or 'i'))
+                        {
+                            // All flags were shell mode flags, don't pass through
+                            break;
+                        }
+                    }
+
+                    filteredArgs.Add(args[i]);
+                    break;
             }
         }
+
+        args = filteredArgs.ToArray();
 
         // Handle -c "command" mode
         if (args.Length > 0 && args[0] == "-c")
@@ -65,7 +120,7 @@ public static class Program
                 commandArgs.Add(args[i]);
             }
 
-            var shell = new RadianceShell();
+            var shell = new RadianceShell(isLoginShell);
             return shell.ExecuteString(command, commandArgs.ToArray());
         }
 
@@ -87,12 +142,12 @@ public static class Program
                 scriptArgs.Add(args[i]);
             }
 
-            var shell = new RadianceShell();
+            var shell = new RadianceShell(false);
             return shell.ExecuteScript(scriptPath, scriptArgs.ToArray());
         }
 
         // Interactive REPL mode
-        var interactiveShell = new RadianceShell();
+        var interactiveShell = new RadianceShell(isLoginShell);
         return interactiveShell.Run();
     }
 
@@ -106,12 +161,14 @@ public static class Program
 
             Usage:
               radiance                    Launch interactive REPL
+              radiance -l, --login        Launch as a login shell
               radiance script.sh [args]   Execute a script file
               radiance -c "command"       Execute an inline command
               radiance --help             Show this help message
-              radiance --version          Show version
+              radiance --version          Show version information
 
             Options:
+              -l, --login     Run as a login shell (sources /etc/profile, ~/.bash_profile)
               -c <command>    Execute the given command string
               -h, --help      Show this help message
               -v, --version   Show version information

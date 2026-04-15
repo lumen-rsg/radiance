@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Radiance.Builtins;
 using Radiance.Interpreter;
@@ -18,7 +19,7 @@ namespace Radiance.Shell;
 /// </summary>
 public sealed class RadianceShell
 {
-    private const string Version = "0.7.5";
+    private const string Version = "1.2.3";
 
     private readonly ShellContext _context;
     private readonly BuiltinRegistry _builtins;
@@ -28,6 +29,7 @@ public sealed class RadianceShell
     private readonly PluginManager _pluginManager;
     private readonly ThemeManager _themeManager = new();
     private readonly SessionStats _sessionStats = new();
+    private readonly bool _isLoginShell;
     private bool _running = true;
 
     /// <summary>
@@ -65,8 +67,28 @@ public sealed class RadianceShell
         Environment.GetEnvironmentVariable("HOME") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".radiance_rc");
 
-    public RadianceShell()
+    /// <summary>
+    /// Login shell profile files sourced in order (first found wins for user-level).
+    /// </summary>
+    private static readonly string HomeDir = Environment.GetEnvironmentVariable("HOME")
+        ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+    private static readonly string[] UserProfileFiles =
+    [
+        Path.Combine(HomeDir, ".bash_profile"),
+        Path.Combine(HomeDir, ".bash_login"),
+        Path.Combine(HomeDir, ".profile")
+    ];
+
+    private static readonly string SystemProfileFile = "/etc/profile";
+
+    /// <summary>
+    /// Creates a new Radiance shell instance.
+    /// </summary>
+    /// <param name="isLoginShell">If true, the shell runs in login mode and sources system/user profiles.</param>
+    public RadianceShell(bool isLoginShell = false)
     {
+        _isLoginShell = isLoginShell;
         _context = InitializeContext();
         _builtins = BuiltinRegistry.CreateDefault();
         _processManager = new ProcessManager();
@@ -122,6 +144,12 @@ public sealed class RadianceShell
     {
         // Load persistent history
         _history.Load();
+
+        // Source login profiles if this is a login shell
+        if (_isLoginShell)
+        {
+            SourceLoginProfiles();
+        }
 
         // Source user config if it exists
         SourceConfig();
@@ -384,6 +412,87 @@ public sealed class RadianceShell
         catch
         {
             // Config file is optional — ignore errors
+        }
+    }
+
+    /// <summary>
+    /// Sources login shell profiles in BASH-compatible order.
+    /// Order: /etc/profile, then first found of ~/.bash_profile, ~/.bash_login, ~/.profile.
+    /// Only called when the shell is invoked as a login shell (-l or argv[0] starts with '-').
+    /// </summary>
+    private void SourceLoginProfiles()
+    {
+        // Set the SHELL environment variable to the Radiance executable path
+        var exePath = Process.GetCurrentProcess().MainModule?.FileName
+            ?? Environment.GetCommandLineArgs().FirstOrDefault()
+            ?? "radiance";
+        Environment.SetEnvironmentVariable("SHELL", exePath);
+        _context.SetVariable("SHELL", exePath);
+
+        // Source /etc/profile (system-wide)
+        SourceFileIfExists(SystemProfileFile, "system profile");
+
+        // Source first found user-level profile (BASH order: .bash_profile → .bash_login → .profile)
+        foreach (var profileFile in UserProfileFiles)
+        {
+            if (File.Exists(profileFile))
+            {
+                SourceFileIfExists(profileFile, "user profile");
+                break; // Only source the first one found (BASH behavior)
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sources a shell script file if it exists. Errors are reported but don't abort the shell.
+    /// </summary>
+    /// <param name="filePath">The path to the script file.</param>
+    /// <param name="label">A human-readable label for error messages.</param>
+    private void SourceFileIfExists(string filePath, string label)
+    {
+        if (!File.Exists(filePath))
+            return;
+
+        try
+        {
+            var content = File.ReadAllText(filePath);
+            if (string.IsNullOrWhiteSpace(content))
+                return;
+
+            // Skip shebang line if present
+            if (content.StartsWith("#!"))
+            {
+                var newlineIdx = content.IndexOf('\n');
+                if (newlineIdx >= 0)
+                    content = content[(newlineIdx + 1)..];
+                else
+                    content = string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(content))
+                return;
+
+            try
+            {
+                var expandedInput = ExpandAliases(content);
+                var lexer = new Lexer.Lexer(expandedInput);
+                var tokens = lexer.Tokenize();
+                var parser = new Radiance.Parser.Parser(tokens);
+                var ast = parser.Parse();
+
+                if (ast is not null)
+                {
+                    _interpreter.Execute(ast);
+                }
+            }
+            catch (Exception ex)
+            {
+                ColorOutput.WriteWarning($"{label}: {filePath}: {ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ColorOutput.WriteWarning($"{label}: {filePath}: {ex.Message}");
         }
     }
 

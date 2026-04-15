@@ -94,6 +94,30 @@ Radiance/
 
 ## Changelog
 
+### [1.2.3] — Login Shell Support ✅
+
+**Added:**
+
+**Login Shell Mode:**
+- `radiance -l` / `radiance --login` — launches Radiance as a login shell
+- Combined flags supported: `radiance -il` (interactive login)
+- Login shell detection via `argv[0]` starting with `-` (standard UNIX convention)
+- BASH-compatible profile sourcing on login:
+  1. `/etc/profile` (system-wide profile)
+  2. First found of: `~/.bash_profile`, `~/.bash_login`, `~/.profile` (user-level profile)
+  3. Then `~/.radiance_rc` (Radiance-specific config, always sourced)
+- Sets `SHELL` environment variable to the Radiance executable path
+- Shebang lines (`#!`) are automatically skipped in profile files
+- Errors in profile files produce warnings but don't abort the shell
+
+**`/etc/shells` Registration:**
+- To register Radiance as a standard shell: `echo /opt/homebrew/bin/Radiance | sudo tee -a /etc/shells`
+- Then change shell with: `chsh -s /opt/homebrew/bin/Radiance`
+
+**Modified files:**
+- `Program.cs` — `-l` / `--login` flag parsing, login shell argv[0] detection, version bump
+- `src/Shell/RadianceShell.cs` — `RadianceShell(bool isLoginShell)` constructor, `SourceLoginProfiles()`, `SourceFileIfExists()`, login profile sourcing in `Run()`
+
 ### [1.2.1] — ✨ The `radiance` Command — Sparkle Mode ✅
 
 **Added:**
