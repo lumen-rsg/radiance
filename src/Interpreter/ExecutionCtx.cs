@@ -118,6 +118,13 @@ public sealed class ShellContext
     /// </summary>
     public Func<string, string[], int>? ScriptFileExecutor { get; set; }
 
+    /// <summary>
+    /// Callback for executing a raw command line string (lex → parse → interpret).
+    /// Used by the <c>exec</c> builtin to run a command and then exit the shell.
+    /// Parameters: command line string. Returns exit code.
+    /// </summary>
+    public Func<string, int>? CommandLineExecutor { get; set; }
+
     // ──── Variable Access (scope-aware) ────
 
     /// <summary>

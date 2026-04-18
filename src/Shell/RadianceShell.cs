@@ -108,11 +108,21 @@ public sealed class RadianceShell
             _context.LastExitCode = code;
         };
 
+        // Wire up exec handling
+        ExecCommand.ExecRequested += (_, code) =>
+        {
+            _running = false;
+            _context.LastExitCode = code;
+        };
+
         // Wire up the script executor callback for the source builtin
         _context.ScriptExecutor = ExecuteInContext;
 
         // Wire up script file executor callback for shebang script execution
         _context.ScriptFileExecutor = ExecuteScript;
+
+        // Wire up command line executor callback for the exec builtin
+        _context.CommandLineExecutor = ExecuteCommandLine;
 
         // Initialize theme system
         _themeManager.Initialize();
@@ -192,6 +202,9 @@ public sealed class RadianceShell
                 continue;
 
             _history.Add(input.TrimEnd('\n'));
+
+            // Expand history macros (e.g., !! → last command)
+            input = ExpandHistoryMacros(input);
 
             // Execute the input through the Lexer → Parser → Interpreter pipeline
             ExecuteInput(input);
@@ -753,6 +766,111 @@ public sealed class RadianceShell
         }
 
         return string.Join('\n', lines);
+    }
+
+    /// <summary>
+    /// Executes a raw command line string (used by the <c>exec</c> builtin).
+    /// Runs through the full lex → parse → interpret pipeline with alias expansion.
+    /// </summary>
+    /// <param name="commandLine">The command line to execute.</param>
+    /// <returns>The exit code.</returns>
+    private int ExecuteCommandLine(string commandLine)
+    {
+        try
+        {
+            var expandedInput = ExpandAliases(commandLine);
+            var lexer = new Lexer.Lexer(expandedInput);
+            var tokens = lexer.Tokenize();
+            var parser = new Radiance.Parser.Parser(tokens);
+            var ast = parser.Parse();
+
+            if (ast is null)
+                return 0;
+
+            return _interpreter.Execute(ast);
+        }
+        catch (Exception ex)
+        {
+            ColorOutput.WriteError(ex.Message);
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// Expands history macros in the input string.
+    /// Supports:
+    /// <list type="bullet">
+    /// <item><c>!!</c> — replaced with the last command from history</item>
+    /// </list>
+    /// Prints the expanded command so the user can see what is being executed.
+    /// Skips expansion inside single-quoted strings.
+    /// </summary>
+    /// <param name="input">The raw input string.</param>
+    /// <returns>The input with history macros expanded, or the original input if no expansion occurred.</returns>
+    private string ExpandHistoryMacros(string input)
+    {
+        if (!_history.GetAll().Any())
+            return input;
+
+        var expanded = ExpandBangBang(input);
+        return expanded;
+    }
+
+    /// <summary>
+    /// Replaces all <c>!!</c> occurrences with the last history entry,
+    /// respecting single-quoted strings (no expansion inside them).
+    /// Prints the expanded command so the user sees what will execute.
+    /// </summary>
+    /// <param name="input">The input potentially containing <c>!!</c>.</param>
+    /// <returns>The expanded input.</returns>
+    private string ExpandBangBang(string input)
+    {
+        if (!input.Contains("!!"))
+            return input;
+
+        var lastCommand = _history.GetEntry(_history.Count);
+        if (lastCommand is null)
+        {
+            ColorOutput.WriteError("!!: event not found (history is empty)");
+            return input;
+        }
+
+        var sb = new StringBuilder();
+        var i = 0;
+        var inSingleQuote = false;
+
+        while (i < input.Length)
+        {
+            // Track single-quote state
+            if (input[i] == '\'' && (i == 0 || input[i - 1] != '\\'))
+            {
+                inSingleQuote = !inSingleQuote;
+                sb.Append(input[i]);
+                i++;
+                continue;
+            }
+
+            // Check for !! outside single quotes
+            if (!inSingleQuote && i + 1 < input.Length && input[i] == '!' && input[i + 1] == '!')
+            {
+                sb.Append(lastCommand);
+                i += 2;
+                continue;
+            }
+
+            sb.Append(input[i]);
+            i++;
+        }
+
+        var result = sb.ToString();
+
+        // Print the expanded command so the user sees what runs (BASH behavior)
+        if (result != input)
+        {
+            Console.WriteLine(result);
+        }
+
+        return result;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
