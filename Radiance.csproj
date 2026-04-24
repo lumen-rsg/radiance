@@ -14,6 +14,12 @@
 
     <ItemGroup>
         <Compile Remove="tests\**" />
+        <Compile Remove="DaVinci\**" />
+        <Compile Remove="DaVinci.Tests\**" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="DaVinci\DaVinci.csproj" />
     </ItemGroup>
 
 </Project>
