@@ -38,7 +38,8 @@ public sealed class Parser
         "for", "in", "do", "done",
         "while", "until",
         "case", "esac",
-        "function"
+        "function",
+        "select"
     };
 
     /// <summary>
@@ -179,6 +180,8 @@ public sealed class Parser
                     return ParseCase();
                 case "function":
                     return ParseFunction();
+                case "select":
+                    return ParseSelect();
             }
 
             // Check for name() { ... } pattern — word followed by ( )
@@ -186,6 +189,18 @@ public sealed class Parser
             {
                 return ParseFunctionNameParens();
             }
+        }
+
+        // Check for subshell: ( list )
+        if (Current().Type == TokenType.LParen)
+        {
+            return ParseSubshell();
+        }
+
+        // Check for brace group: { list; }
+        if (Current().Type == TokenType.LBrace)
+        {
+            return ParseBraceGroup();
         }
 
         return ParseSimpleCommand();
@@ -290,6 +305,62 @@ public sealed class Parser
         ExpectKeyword("done");
 
         return new ForNode
+        {
+            VariableName = varName,
+            IterableWords = iterableWords,
+            Body = body
+        };
+    }
+
+    /// <summary>
+    /// Parses a select/in/do/done construct.
+    /// Displays a numbered menu, reads user selection, sets the variable, and executes the body.
+    /// </summary>
+    private SelectNode ParseSelect()
+    {
+        ExpectKeyword("select");
+        SkipCommentsAndNewlines();
+
+        // Variable name
+        if (Current().Type != TokenType.Word)
+        {
+            ReportError($"expected variable name after 'select', got {Current().Type}");
+            return new SelectNode();
+        }
+
+        var varName = Advance().Value;
+
+        SkipCommentsAndNewlines();
+
+        // Optional 'in' clause
+        var iterableWords = new List<List<WordPart>>();
+        if (IsKeyword("in"))
+        {
+            ExpectKeyword("in");
+
+            // Collect words until separator or 'do'
+            while (IsWordToken() && !IsKeyword("do"))
+            {
+                var wordParts = CollectWordParts();
+                iterableWords.Add(wordParts);
+            }
+        }
+
+        // Skip separator before 'do' (could be ; or newline)
+        if (Current().Type is TokenType.Semicolon or TokenType.Newline)
+        {
+            Advance();
+            SkipCommentsAndNewlines();
+        }
+
+        ExpectKeyword("do");
+        SkipCommentsAndNewlines();
+
+        // Parse body
+        var body = ParseCompoundList("done");
+        ExpectKeyword("done");
+
+        return new SelectNode
         {
             VariableName = varName,
             IterableWords = iterableWords,
@@ -619,6 +690,8 @@ public sealed class Parser
                     return ParseCase();
                 case "function":
                     return ParseFunction();
+                case "select":
+                    return ParseSelect();
             }
 
             // Check for name() { ... } pattern
@@ -628,7 +701,122 @@ public sealed class Parser
             }
         }
 
+        // Check for subshell
+        if (Current().Type == TokenType.LParen)
+        {
+            return ParseSubshell();
+        }
+
+        // Check for brace group
+        if (Current().Type == TokenType.LBrace)
+        {
+            return ParseBraceGroup();
+        }
+
         return ParseSimpleCommand();
+    }
+
+    // ──── Subshell Parser ────
+
+    /// <summary>
+    /// Parses a subshell: <c>( list )</c>.
+    /// The body is a compound list executed in a child context.
+    /// </summary>
+    private SubshellNode ParseSubshell()
+    {
+        Advance(); // consume (
+        SkipCommentsAndNewlines();
+
+        // Parse the body — stops at )
+        var body = ParseListUntilRParen();
+
+        // Expect )
+        if (Current().Type == TokenType.RParen)
+        {
+            Advance();
+        }
+        else
+        {
+            ReportError($"expected ')' to close subshell, got '{Current().Value}' ({Current().Type})");
+        }
+
+        // Collect redirections after the subshell
+        var redirects = new List<RedirectNode>();
+        while (IsRedirectOperator())
+        {
+            var redirect = ParseRedirect();
+            if (redirect is not null)
+                redirects.Add(redirect);
+        }
+
+        return new SubshellNode { Body = body, Redirects = redirects };
+    }
+
+    // ──── Brace Group Parser ────
+
+    /// <summary>
+    /// Parses a brace group: <c>{ list; }</c>.
+    /// The body is executed in the current shell scope (unlike a subshell).
+    /// </summary>
+    private BraceGroupNode ParseBraceGroup()
+    {
+        Advance(); // consume {
+        SkipCommentsAndNewlines();
+
+        // Parse the body using the existing brace body parser
+        var body = ParseBraceBody();
+
+        // Expect }
+        if (Current().Type == TokenType.RBrace)
+        {
+            Advance();
+        }
+        else
+        {
+            ReportError($"expected '}}' to close brace group, got '{Current().Value}' ({Current().Type})");
+        }
+
+        // Collect redirections after the brace group
+        var redirects = new List<RedirectNode>();
+        while (IsRedirectOperator())
+        {
+            var redirect = ParseRedirect();
+            if (redirect is not null)
+                redirects.Add(redirect);
+        }
+
+        return new BraceGroupNode { Body = body, Redirects = redirects };
+    }
+
+    /// <summary>
+    /// Parses a list that stops when encountering a closing parenthesis.
+    /// Similar to <see cref="ParseList"/> but uses ) as the terminator.
+    /// </summary>
+    private ListNode ParseListUntilRParen()
+    {
+        var pipelines = new List<PipelineNode>();
+        var separators = new List<TokenType>();
+
+        SkipCommentsAndNewlines();
+
+        if (Current().Type == TokenType.RParen)
+            return new ListNode();
+
+        pipelines.Add(ParseAndOrForBraceBody());
+
+        while (IsListSeparator(out var separatorType))
+        {
+            separators.Add(separatorType);
+            Advance();
+            SkipCommentsAndNewlines();
+
+            if (Current().Type == TokenType.RParen || IsAtEnd())
+                break;
+
+            pipelines.Add(ParseAndOrForBraceBody());
+        }
+
+        return new ListNode { Pipelines = pipelines, Separators = separators };
     }
 
     // ──── Simple Command Parser ────
@@ -641,6 +829,7 @@ public sealed class Parser
     private SimpleCommandNode ParseSimpleCommand()
     {
         var assignments = new List<AssignmentNode>();
+        var arrayAssignments = new List<ArrayAssignmentNode>();
         var words = new List<List<WordPart>>();
         var redirects = new List<RedirectNode>();
 
@@ -653,7 +842,20 @@ public sealed class Parser
             var eqIdx = token.Value.IndexOf('=');
             var name = token.Value[..eqIdx];
             var value = token.Value[(eqIdx + 1)..];
-            assignments.Add(new AssignmentNode(name, value));
+
+            // Check for array assignment: VAR=(val1 val2 val3)
+            if (value.StartsWith('(') && value.EndsWith(')'))
+            {
+                var inner = value[1..^1].Trim();
+                var elements = string.IsNullOrEmpty(inner)
+                    ? new List<string>()
+                    : SplitArrayElements(inner);
+                arrayAssignments.Add(new ArrayAssignmentNode { Name = name, Elements = elements });
+            }
+            else
+            {
+                assignments.Add(new AssignmentNode(name, value));
+            }
         }
 
         // Collect command words — includes AssignmentWord tokens after command name
@@ -683,6 +885,7 @@ public sealed class Parser
         return new SimpleCommandNode
         {
             Assignments = assignments,
+            ArrayAssignments = arrayAssignments,
             Words = words,
             Redirects = redirects
         };
@@ -711,6 +914,50 @@ public sealed class Parser
         // Remove the fd prefix from words
         words.RemoveAt(words.Count - 1);
         return fd;
+    }
+
+    /// <summary>
+    /// Splits an array assignment body into elements, respecting quoted strings.
+    /// E.g., <c>a "b c" d</c> → ["a", "b c", "d"]
+    /// </summary>
+    private static List<string> SplitArrayElements(string inner)
+    {
+        var elements = new List<string>();
+        var current = new System.Text.StringBuilder();
+        var inSingleQuote = false;
+        var inDoubleQuote = false;
+
+        foreach (var c in inner)
+        {
+            if (c == '\'' && !inDoubleQuote)
+            {
+                inSingleQuote = !inSingleQuote;
+                continue;
+            }
+
+            if (c == '"' && !inSingleQuote)
+            {
+                inDoubleQuote = !inDoubleQuote;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c) && !inSingleQuote && !inDoubleQuote)
+            {
+                if (current.Length > 0)
+                {
+                    elements.Add(current.ToString());
+                    current.Clear();
+                }
+                continue;
+            }
+
+            current.Append(c);
+        }
+
+        if (current.Length > 0)
+            elements.Add(current.ToString());
+
+        return elements;
     }
 
     /// <summary>
@@ -760,7 +1007,7 @@ public sealed class Parser
     {
         var wordParts = new List<WordPart>();
 
-        while (IsWordToken())
+        while (IsWordToken() || Current().Type is TokenType.ProcessSubIn or TokenType.ProcessSubOut)
         {
             var token = Current();
 
@@ -779,6 +1026,32 @@ public sealed class Parser
                 case TokenType.SingleQuotedString:
                     wordParts.Add(new WordPart(token.Value, WordQuoting.Single));
                     break;
+                case TokenType.ProcessSubIn:
+                {
+                    // <(cmd) — extract inner command, strip <( and )
+                    var inner = token.Value;
+                    if (inner.StartsWith("<(") && inner.EndsWith(')'))
+                        inner = inner[2..^1];
+                    wordParts.Add(new WordPart("", WordQuoting.None)
+                    {
+                        ProcessSubstitutionCommand = inner,
+                        IsOutputSubstitution = false
+                    });
+                    break;
+                }
+                case TokenType.ProcessSubOut:
+                {
+                    // >(cmd) — extract inner command, strip >( and )
+                    var inner = token.Value;
+                    if (inner.StartsWith(">(") && inner.EndsWith(')'))
+                        inner = inner[2..^1];
+                    wordParts.Add(new WordPart("", WordQuoting.None)
+                    {
+                        ProcessSubstitutionCommand = inner,
+                        IsOutputSubstitution = true
+                    });
+                    break;
+                }
             }
 
             Advance();

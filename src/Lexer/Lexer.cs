@@ -145,6 +145,12 @@ public sealed class Lexer
 
         if (c == '>')
         {
+            // Process substitution: >(cmd)
+            if (Peek(1) == '(')
+            {
+                return ReadProcessSubstitution(TokenType.ProcessSubOut);
+            }
+
             if (Peek(1) == '>')
             {
                 var token = MakeToken(TokenType.DoubleGreaterThan, ">>");
@@ -168,9 +174,38 @@ public sealed class Lexer
 
         if (c == '<')
         {
-            var token = MakeToken(TokenType.LessThan, "<");
-            Advance();
-            return token;
+            // Process substitution: <(cmd)
+            if (Peek(1) == '(')
+            {
+                return ReadProcessSubstitution(TokenType.ProcessSubIn);
+            }
+
+            if (Peek(1) == '<')
+            {
+                if (Peek(2) == '<')
+                {
+                    // <<< — here-string
+                    Advance(); Advance(); Advance();
+                    return MakeToken(TokenType.TripleLessThan, "<<<");
+                }
+
+                if (Peek(2) == '-')
+                {
+                    // <<- — heredoc with tab stripping
+                    Advance(); Advance(); Advance();
+                    return MakeToken(TokenType.DoubleLessThanDash, "<<-");
+                }
+
+                // << — heredoc
+                Advance(); Advance();
+                return MakeToken(TokenType.DoubleLessThan, "<<");
+            }
+
+            {
+                var token = MakeToken(TokenType.LessThan, "<");
+                Advance();
+                return token;
+            }
         }
 
         if (c == '(')
@@ -391,6 +426,32 @@ public sealed class Lexer
         // contain '=', and the '=' must not be the first character.
         var tokenType = IsAssignmentWord(value) ? TokenType.AssignmentWord : TokenType.Word;
 
+        // Handle array assignment: VAR=(val1 val2 val3)
+        // If this is an assignment word and the value after '=' starts with '(',
+        // read until the matching ')' to capture the entire array assignment.
+        if (tokenType == TokenType.AssignmentWord)
+        {
+            var eqIdx = value.IndexOf('=');
+            if (eqIdx + 1 < value.Length && value[eqIdx + 1] == '(')
+            {
+                // Read until matching ')'
+                var depth = 1;
+                while (_pos < _source.Length && depth > 0)
+                {
+                    var ch = _source[_pos];
+                    if (ch == '(') depth++;
+                    else if (ch == ')') depth--;
+
+                    sb.Append(ch);
+                    Advance();
+
+                    if (depth == 0)
+                        break;
+                }
+                value = sb.ToString();
+            }
+        }
+
         return new Token(tokenType, value, startLine, startCol, _hadLeadingWhitespace);
     }
 
@@ -610,5 +671,60 @@ public sealed class Lexer
     private Token MakeToken(TokenType type, string value)
     {
         return new Token(type, value, _line, _column, _hadLeadingWhitespace);
+    }
+
+    /// <summary>
+    /// Reads a process substitution: &lt;(cmd) or &gt;(cmd).
+    /// Captures the inner command between the parentheses.
+    /// </summary>
+    private Token ReadProcessSubstitution(TokenType type)
+    {
+        var sb = new StringBuilder();
+        sb.Append(_source[_pos]); // < or >
+        Advance();
+        sb.Append(_source[_pos]); // (
+        Advance();
+
+        var depth = 1;
+        while (_pos < _source.Length && depth > 0)
+        {
+            var ch = _source[_pos];
+            if (ch == '(') depth++;
+            else if (ch == ')') { depth--; if (depth == 0) { sb.Append(ch); Advance(); break; } }
+            else if (ch == '\'' )
+            {
+                // Skip single-quoted string
+                sb.Append(ch); Advance();
+                while (_pos < _source.Length && _source[_pos] != '\'')
+                {
+                    sb.Append(_source[_pos]);
+                    Advance();
+                }
+                if (_pos < _source.Length) { sb.Append(_source[_pos]); Advance(); }
+                continue;
+            }
+            else if (ch == '"')
+            {
+                // Skip double-quoted string
+                sb.Append(ch); Advance();
+                while (_pos < _source.Length && _source[_pos] != '"')
+                {
+                    if (_source[_pos] == '\\' && _pos + 1 < _source.Length)
+                    {
+                        sb.Append(_source[_pos]); Advance();
+                        sb.Append(_source[_pos]); Advance();
+                        continue;
+                    }
+                    sb.Append(_source[_pos]); Advance();
+                }
+                if (_pos < _source.Length) { sb.Append(_source[_pos]); Advance(); }
+                continue;
+            }
+
+            sb.Append(ch);
+            Advance();
+        }
+
+        return MakeToken(type, sb.ToString());
     }
 }

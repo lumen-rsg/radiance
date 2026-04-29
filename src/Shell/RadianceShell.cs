@@ -5,6 +5,7 @@ using Radiance.Interpreter;
 using Radiance.Lexer;
 using Radiance.Parser;
 using Radiance.Plugins;
+using Radiance.Terminal;
 using Radiance.Themes;
 using Radiance.Utils;
 
@@ -29,8 +30,22 @@ public sealed class RadianceShell
     private readonly PluginManager _pluginManager;
     private readonly ThemeManager _themeManager = new();
     private readonly SessionStats _sessionStats = new();
+    private readonly DaVinciRenderer _daVinci = new();
+    private readonly SignalHandler _signalHandler = new();
     private readonly bool _isLoginShell;
     private bool _running = true;
+
+    /// <summary>
+    /// Kill ring for killed text segments (yank with Ctrl+Y, cycle with Alt+Y).
+    /// </summary>
+    private readonly List<string> _killRing = new();
+    private int _killRingIndex = -1;
+    private bool _yankActive = false;
+
+    /// <summary>
+    /// Whether real-time syntax highlighting is enabled.
+    /// </summary>
+    private bool _syntaxHighlighting = true;
 
     /// <summary>
     /// Cached list of PATH executables for tab completion.
@@ -45,7 +60,7 @@ public sealed class RadianceShell
     /// </summary>
     private static readonly HashSet<string> BlockOpeners = new(StringComparer.Ordinal)
     {
-        "if", "for", "while", "until", "case", "function"
+        "if", "for", "while", "until", "case", "function", "select"
     };
 
     /// <summary>
@@ -57,7 +72,8 @@ public sealed class RadianceShell
         ["for"] = "done",
         ["while"] = "done",
         ["until"] = "done",
-        ["case"] = "esac"
+        ["case"] = "esac",
+        ["select"] = "done"
     };
 
     /// <summary>
@@ -92,6 +108,7 @@ public sealed class RadianceShell
         _context = InitializeContext();
         _builtins = BuiltinRegistry.CreateDefault();
         _processManager = new ProcessManager();
+        _processManager.SignalHandler = _signalHandler;
         _interpreter = new ShellInterpreter(_context, _builtins, _processManager);
         _history = new History();
 
@@ -135,11 +152,31 @@ public sealed class RadianceShell
         // Register theme command
         _builtins.Register(new ThemeCommand(_themeManager));
 
+        // Wire up signal handler
+        _signalHandler.Context = _context;
+        _signalHandler.CommandExecutor = ExecuteCommandLine;
+        if (_builtins.TryGetCommand("trap") is TrapCommand trapCmd)
+        {
+            trapCmd.SignalHandler = _signalHandler;
+        }
+
+        // Register SIGINT handler — forward to child process or cancel current input
+        Console.CancelKeyPress += (_, e) =>
+        {
+            if (_signalHandler.HandleSigInt())
+            {
+                // Signal was forwarded to child process — don't terminate the shell
+                e.Cancel = true;
+            }
+            // If no child process, let the default behavior (cancel current input) occur
+        };
+
         // Wire up radiance command with session stats and version
         if (_builtins.TryGetCommand("radiance") is RadianceCommand radianceCmd)
         {
             radianceCmd.Stats = _sessionStats;
             radianceCmd.Version = Version;
+            radianceCmd.DaVinci = _daVinci;
         }
     }
 
@@ -213,6 +250,9 @@ public sealed class RadianceShell
         // Save persistent history on exit
         _history.Save();
 
+        // Run EXIT trap if registered
+        _signalHandler.RunExitTrap();
+
         // Unload all plugins on exit
         _pluginManager.UnloadAll();
 
@@ -238,7 +278,9 @@ public sealed class RadianceShell
 
         while (blockStack.Count > 0)
         {
-            Console.Write("> ");
+            var ps2r = _context.GetVariable("PS2");
+            if (string.IsNullOrEmpty(ps2r)) ps2r = "> ";
+            Console.Write(PromptExpander.Expand(ps2r, _context));
             var continuation = Console.ReadLine();
 
             if (continuation is null)
@@ -360,19 +402,29 @@ public sealed class RadianceShell
             // Expand aliases in the input
             var expandedInput = ExpandAliases(content);
 
-            // Lex: input → tokens
-            var lexer = new Lexer.Lexer(expandedInput);
-            var tokens = lexer.Tokenize();
+            // Preprocess heredocs
+            var (processedInput, tempFiles) = HeredocProcessor.Process(expandedInput);
 
-            // Parse: tokens → AST
-            var parser = new Radiance.Parser.Parser(tokens);
-            var ast = parser.Parse();
+            try
+            {
+                // Lex: input → tokens
+                var lexer = new Lexer.Lexer(processedInput);
+                var tokens = lexer.Tokenize();
 
-            if (ast is null)
-                return 0;
+                // Parse: tokens → AST
+                var parser = new Radiance.Parser.Parser(tokens);
+                var ast = parser.Parse();
 
-            // Interpret: AST → execution
-            return _interpreter.Execute(ast);
+                if (ast is null)
+                    return 0;
+
+                // Interpret: AST → execution
+                return _interpreter.Execute(ast);
+            }
+            finally
+            {
+                HeredocProcessor.Cleanup(tempFiles);
+            }
         }
         catch (Exception ex)
         {
@@ -542,7 +594,8 @@ public sealed class RadianceShell
     }
 
     /// <summary>
-    /// Reads input, continuing with a PS2 prompt ("> ") if block constructs are unclosed.
+    /// Reads input, continuing with a PS2 prompt ("> ") if block constructs are unclosed
+    /// or heredoc bodies need to be read.
     /// </summary>
     /// <param name="ps1">The primary prompt string (for calculating left offset).</param>
     /// <returns>The full input string, possibly spanning multiple lines. Null on EOF.</returns>
@@ -556,18 +609,19 @@ public sealed class RadianceShell
 
         sb.Append(firstLine);
 
-        // Check if we need more input (unclosed blocks)
+        // Check if we need more input (unclosed blocks or heredocs)
         var blockStack = ComputeBlockStack(firstLine);
+        var heredocDelimiters = ExtractHeredocDelimiters(firstLine);
 
-        while (blockStack.Count > 0)
+        while (blockStack.Count > 0 || heredocDelimiters.Count > 0)
         {
-            // PS2 prompt — continuation
-            Console.Write("> ");
+            var ps2 = _context.GetVariable("PS2");
+            if (string.IsNullOrEmpty(ps2)) ps2 = "> ";
+            Console.Write(PromptExpander.Expand(ps2, _context));
             var continuation = ReadLine();
 
             if (continuation is null)
             {
-                // EOF during continuation
                 Console.WriteLine();
                 break;
             }
@@ -575,12 +629,115 @@ public sealed class RadianceShell
             sb.Append('\n');
             sb.Append(continuation);
 
+            // Check if this line closes any pending heredocs
+            for (var h = heredocDelimiters.Count - 1; h >= 0; h--)
+            {
+                var trimmed = continuation.TrimStart('\t'); // <<- strips tabs
+                if (trimmed == heredocDelimiters[h])
+                {
+                    heredocDelimiters.RemoveAt(h);
+                }
+            }
+
             // Update block stack with the new line
-            var newStack = ComputeBlockStack(continuation, blockStack);
-            blockStack = newStack;
+            if (blockStack.Count > 0)
+            {
+                var newStack = ComputeBlockStack(continuation, blockStack);
+                blockStack = newStack;
+            }
+
+            // Check for new heredocs in continuation lines (only if no pending blocks)
+            if (heredocDelimiters.Count == 0 && blockStack.Count == 0)
+            {
+                var newDelimiters = ExtractHeredocDelimiters(continuation);
+                heredocDelimiters.AddRange(newDelimiters);
+            }
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Extracts heredoc delimiter words from a line.
+    /// Detects <c>&lt;&lt;DELIM</c>, <c>&lt;&lt;-DELIM</c>, <c>&lt;&lt;'DELIM'</c> patterns.
+    /// </summary>
+    private static List<string> ExtractHeredocDelimiters(string line)
+    {
+        var delimiters = new List<string>();
+        var i = 0;
+
+        while (i < line.Length)
+        {
+            // Skip quoted strings
+            if (line[i] == '\'')
+            {
+                i++;
+                while (i < line.Length && line[i] != '\'') i++;
+                if (i < line.Length) i++;
+                continue;
+            }
+            if (line[i] == '"')
+            {
+                i++;
+                while (i < line.Length && line[i] != '"') i++;
+                if (i < line.Length) i++;
+                continue;
+            }
+
+            // Check for <<<
+            if (line[i] == '<' && i + 2 < line.Length && line[i + 1] == '<' && line[i + 2] == '<')
+            {
+                // Here-string — no delimiter to track (single word, not multi-line)
+                i += 3;
+                continue;
+            }
+
+            // Check for <<- or <<
+            if (line[i] == '<' && i + 1 < line.Length && line[i + 1] == '<')
+            {
+                i += 2;
+                // Skip -
+                if (i < line.Length && line[i] == '-')
+                    i++;
+
+                // Skip whitespace
+                while (i < line.Length && (line[i] == ' ' || line[i] == '\t'))
+                    i++;
+
+                // Read delimiter
+                var delim = new StringBuilder();
+                if (i < line.Length && (line[i] == '\'' || line[i] == '"'))
+                {
+                    var q = line[i];
+                    i++;
+                    while (i < line.Length && line[i] != q)
+                    {
+                        delim.Append(line[i]);
+                        i++;
+                    }
+                    if (i < line.Length) i++;
+                }
+                else
+                {
+                    while (i < line.Length && !char.IsWhiteSpace(line[i])
+                           && line[i] != ';' && line[i] != '|' && line[i] != '&'
+                           && line[i] != '<' && line[i] != '>')
+                    {
+                        delim.Append(line[i]);
+                        i++;
+                    }
+                }
+
+                if (delim.Length > 0)
+                    delimiters.Add(delim.ToString());
+
+                continue;
+            }
+
+            i++;
+        }
+
+        return delimiters;
     }
 
     /// <summary>
@@ -672,7 +829,8 @@ public sealed class RadianceShell
 
     /// <summary>
     /// Executes a single line of input by lexing, parsing, and interpreting.
-    /// Handles alias expansion before parsing. Tracks session statistics.
+    /// Handles alias expansion and heredoc preprocessing before parsing.
+    /// Tracks session statistics.
     /// </summary>
     private void ExecuteInput(string input)
     {
@@ -696,19 +854,30 @@ public sealed class RadianceShell
             // Expand aliases in the input
             var expandedInput = ExpandAliases(input);
 
-            // Lex: input → tokens
-            var lexer = new Lexer.Lexer(expandedInput);
-            var tokens = lexer.Tokenize();
+            // Preprocess heredocs (replaces <<DELIM...DELIM with < tempfile)
+            var (processedInput, tempFiles) = HeredocProcessor.Process(expandedInput);
 
-            // Parse: tokens → AST
-            var parser = new Radiance.Parser.Parser(tokens);
-            var ast = parser.Parse();
+            try
+            {
+                // Lex: input → tokens
+                var lexer = new Lexer.Lexer(processedInput);
+                var tokens = lexer.Tokenize();
 
-            if (ast is null)
-                return;
+                // Parse: tokens → AST
+                var parser = new Radiance.Parser.Parser(tokens);
+                var ast = parser.Parse();
 
-            // Interpret: AST → execution
-            _context.LastExitCode = _interpreter.Execute(ast);
+                if (ast is null)
+                    return;
+
+                // Interpret: AST → execution
+                _context.LastExitCode = _interpreter.Execute(ast);
+            }
+            finally
+            {
+                // Clean up heredoc temp files
+                HeredocProcessor.Cleanup(tempFiles);
+            }
         }
         catch (Exception ex)
         {
@@ -812,32 +981,71 @@ public sealed class RadianceShell
         if (!_history.GetAll().Any())
             return input;
 
-        var expanded = ExpandBangBang(input);
-        return expanded;
+        // Handle ^old^new quick substitution first
+        var result = ExpandCaretSubstitution(input);
+        result = ExpandBangDesignators(result);
+        return result;
     }
 
     /// <summary>
-    /// Replaces all <c>!!</c> occurrences with the last history entry,
-    /// respecting single-quoted strings (no expansion inside them).
-    /// Prints the expanded command so the user sees what will execute.
+    /// Handles <c>^old^new^</c> quick substitution — replaces first occurrence of old with new in last command.
     /// </summary>
-    /// <param name="input">The input potentially containing <c>!!</c>.</param>
-    /// <returns>The expanded input.</returns>
-    private string ExpandBangBang(string input)
+    private string ExpandCaretSubstitution(string input)
     {
-        if (!input.Contains("!!"))
+        if (input.Length < 3 || input[0] != '^')
             return input;
 
-        var lastCommand = _history.GetEntry(_history.Count);
-        if (lastCommand is null)
+        var caretCount = 0;
+        var firstEnd = -1;
+        for (var i = 1; i < input.Length; i++)
         {
-            ColorOutput.WriteError("!!: event not found (history is empty)");
-            return input;
+            if (input[i] == '^')
+            {
+                caretCount++;
+                if (caretCount == 1)
+                    firstEnd = i;
+                else if (caretCount == 2)
+                {
+                    var old = input[1..firstEnd];
+                    var newStr = input[(firstEnd + 1)..i];
+                    var lastCmd = _history.GetEntry(_history.Count);
+                    if (lastCmd is null)
+                        return input;
+
+                    var expanded = old.Length > 0
+                        ? ReplaceFirst(lastCmd, old, newStr)
+                        : lastCmd;
+
+                    Console.WriteLine(expanded);
+                    return expanded;
+                }
+            }
         }
+
+        return input;
+    }
+
+    /// <summary>
+    /// Replaces the first occurrence of <paramref name="search"/> with <paramref name="replace"/>.
+    /// </summary>
+    private static string ReplaceFirst(string text, string search, string replace)
+    {
+        var idx = text.IndexOf(search, StringComparison.Ordinal);
+        return idx < 0 ? text : string.Concat(text.AsSpan(0, idx), replace, text.AsSpan(idx + search.Length));
+    }
+
+    /// <summary>
+    /// Expands all ! designators: !!, !n, !-n, !string, !?string?, !$, !*, !^
+    /// </summary>
+    private string ExpandBangDesignators(string input)
+    {
+        if (!input.Contains('!'))
+            return input;
 
         var sb = new StringBuilder();
         var i = 0;
         var inSingleQuote = false;
+        var changed = false;
 
         while (i < input.Length)
         {
@@ -850,25 +1058,157 @@ public sealed class RadianceShell
                 continue;
             }
 
-            // Check for !! outside single quotes
-            if (!inSingleQuote && i + 1 < input.Length && input[i] == '!' && input[i + 1] == '!')
+            if (inSingleQuote || input[i] != '!')
             {
-                sb.Append(lastCommand);
+                sb.Append(input[i]);
+                i++;
+                continue;
+            }
+
+            // We have a ! at position i
+            if (i + 1 >= input.Length)
+            {
+                sb.Append(input[i]);
+                i++;
+                continue;
+            }
+
+            var next = input[i + 1];
+
+            // !! — last command
+            if (next == '!')
+            {
+                var lastCmd = _history.GetEntry(_history.Count);
+                if (lastCmd is null)
+                {
+                    ColorOutput.WriteError("!!: event not found");
+                    return input;
+                }
+                sb.Append(lastCmd);
+                changed = true;
                 i += 2;
                 continue;
             }
 
+            // !n — history entry by number
+            if (char.IsDigit(next))
+            {
+                var j = i + 1;
+                while (j < input.Length && char.IsDigit(input[j]))
+                    j++;
+                var numStr = input[(i + 1)..j];
+                if (int.TryParse(numStr, out var num))
+                {
+                    var entry = _history.GetEntry(num);
+                    if (entry is null)
+                    {
+                        ColorOutput.WriteError($"!{numStr}: event not found");
+                        return input;
+                    }
+                    sb.Append(entry);
+                    changed = true;
+                    i = j;
+                    continue;
+                }
+            }
+
+            // !-n — relative history entry
+            if (next == '-' && i + 2 < input.Length && char.IsDigit(input[i + 2]))
+            {
+                var j = i + 2;
+                while (j < input.Length && char.IsDigit(input[j]))
+                    j++;
+                var numStr = input[(i + 2)..j];
+                if (int.TryParse(numStr, out var offset))
+                {
+                    var entry = _history.GetEntry(_history.Count - offset + 1);
+                    if (entry is null)
+                    {
+                        ColorOutput.WriteError($"!-{numStr}: event not found");
+                        return input;
+                    }
+                    sb.Append(entry);
+                    changed = true;
+                    i = j;
+                    continue;
+                }
+            }
+
+            // !?string? — most recent command containing string
+            if (next == '?')
+            {
+                var end = input.IndexOf('?', i + 2);
+                if (end >= 0)
+                {
+                    var search = input[(i + 2)..end];
+                    var entry = _history.GetEntryBySubstring(search);
+                    if (entry is null)
+                    {
+                        ColorOutput.WriteError($"!?{search}: event not found");
+                        return input;
+                    }
+                    sb.Append(entry);
+                    changed = true;
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            // !$ — last argument of last command
+            if (next == '$')
+            {
+                sb.Append(_history.GetLastArg());
+                changed = true;
+                i += 2;
+                continue;
+            }
+
+            // !^ — first argument of last command
+            if (next == '^')
+            {
+                sb.Append(_history.GetFirstArg());
+                changed = true;
+                i += 2;
+                continue;
+            }
+
+            // !* — all arguments of last command
+            if (next == '*')
+            {
+                var allArgs = _history.GetAllArgs();
+                sb.Append(string.Join(" ", allArgs));
+                changed = true;
+                i += 2;
+                continue;
+            }
+
+            // !string — most recent command starting with string
+            if (char.IsLetter(next) || next == '_')
+            {
+                var j = i + 1;
+                while (j < input.Length && (char.IsLetterOrDigit(input[j]) || input[j] == '_'))
+                    j++;
+                var prefix = input[(i + 1)..j];
+                var entry = _history.GetEntryByPrefix(prefix);
+                if (entry is null)
+                {
+                    ColorOutput.WriteError($"!{prefix}: event not found");
+                    return input;
+                }
+                sb.Append(entry);
+                changed = true;
+                i = j;
+                continue;
+            }
+
+            // Unknown ! pattern — pass through
             sb.Append(input[i]);
             i++;
         }
 
         var result = sb.ToString();
-
-        // Print the expanded command so the user sees what runs (BASH behavior)
-        if (result != input)
-        {
+        if (changed && result != input)
             Console.WriteLine(result);
-        }
 
         return result;
     }
@@ -1039,30 +1379,38 @@ public sealed class RadianceShell
                 continue;
             }
 
-            // ─── Ctrl+K — Kill from cursor to end of line ───
+            // ─── Ctrl+K — Kill from cursor to end of line (push to kill ring) ───
             if (key.Key == ConsoleKey.K && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             {
                 if (cursorPos < sb.Length)
                 {
+                    var killed = sb.ToString(cursorPos, sb.Length - cursorPos);
+                    _killRing.Add(killed);
+                    _killRingIndex = _killRing.Count - 1;
                     sb.Remove(cursorPos, sb.Length - cursorPos);
                     RedisplayLine(startLeft, sb, cursorPos);
                 }
+                _yankActive = false;
                 continue;
             }
 
-            // ─── Ctrl+U — Kill from beginning of line to cursor ───
+            // ─── Ctrl+U — Kill from beginning of line to cursor (push to kill ring) ───
             if (key.Key == ConsoleKey.U && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             {
                 if (cursorPos > 0)
                 {
+                    var killed = sb.ToString(0, cursorPos);
+                    _killRing.Add(killed);
+                    _killRingIndex = _killRing.Count - 1;
                     sb.Remove(0, cursorPos);
                     cursorPos = 0;
                     RedisplayLine(startLeft, sb, cursorPos);
                 }
+                _yankActive = false;
                 continue;
             }
 
-            // ─── Ctrl+W — Delete word backward ───
+            // ─── Ctrl+W — Delete word backward (push to kill ring) ───
             if (key.Key == ConsoleKey.W && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             {
                 if (cursorPos > 0)
@@ -1075,10 +1423,14 @@ public sealed class RadianceShell
                     while (wordStart > 0 && !char.IsWhiteSpace(sb[wordStart - 1]))
                         wordStart--;
 
+                    var killed = sb.ToString(wordStart, cursorPos - wordStart);
+                    _killRing.Add(killed);
+                    _killRingIndex = _killRing.Count - 1;
                     sb.Remove(wordStart, cursorPos - wordStart);
                     cursorPos = wordStart;
                     RedisplayLine(startLeft, sb, cursorPos);
                 }
+                _yankActive = false;
                 continue;
             }
 
@@ -1100,6 +1452,113 @@ public sealed class RadianceShell
                 continue;
             }
 
+            // ─── Ctrl+Y — Yank from kill ring ───
+            if (key.Key == ConsoleKey.Y && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                if (_killRing.Count > 0 && _killRingIndex >= 0)
+                {
+                    var text = _killRing[_killRingIndex];
+                    sb.Insert(cursorPos, text);
+                    cursorPos += text.Length;
+                    _yankActive = true;
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Alt+Y — Yank-pop (cycle kill ring after yank) ───
+            if (key.Key == ConsoleKey.Y && key.Modifiers.HasFlag(ConsoleModifiers.Alt) && _yankActive)
+            {
+                if (_killRing.Count > 0)
+                {
+                    // Remove previously yanked text
+                    var prevText = _killRing[_killRingIndex];
+                    sb.Remove(cursorPos - prevText.Length, prevText.Length);
+                    cursorPos -= prevText.Length;
+
+                    // Cycle to next kill ring entry
+                    _killRingIndex = (_killRingIndex - 1 + _killRing.Count) % _killRing.Count;
+                    var text = _killRing[_killRingIndex];
+                    sb.Insert(cursorPos, text);
+                    cursorPos += text.Length;
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                continue;
+            }
+
+            // ─── Alt+f — Forward word movement ───
+            if (key.Key == ConsoleKey.F && key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+            {
+                var newPos = cursorPos;
+                // Skip non-whitespace
+                while (newPos < sb.Length && !char.IsWhiteSpace(sb[newPos]))
+                    newPos++;
+                // Skip whitespace
+                while (newPos < sb.Length && char.IsWhiteSpace(sb[newPos]))
+                    newPos++;
+                cursorPos = newPos;
+                SetCursorPosition(startLeft, sb, cursorPos);
+                _yankActive = false;
+                continue;
+            }
+
+            // ─── Alt+b — Backward word movement ───
+            if (key.Key == ConsoleKey.B && key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+            {
+                var newPos = cursorPos;
+                // Skip whitespace backward
+                while (newPos > 0 && char.IsWhiteSpace(sb[newPos - 1]))
+                    newPos--;
+                // Skip non-whitespace backward
+                while (newPos > 0 && !char.IsWhiteSpace(sb[newPos - 1]))
+                    newPos--;
+                cursorPos = newPos;
+                SetCursorPosition(startLeft, sb, cursorPos);
+                _yankActive = false;
+                continue;
+            }
+
+            // ─── Alt+d — Delete word forward (push to kill ring) ───
+            if (key.Key == ConsoleKey.D && key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+            {
+                var endPos = cursorPos;
+                while (endPos < sb.Length && !char.IsWhiteSpace(sb[endPos]))
+                    endPos++;
+                while (endPos < sb.Length && char.IsWhiteSpace(sb[endPos]))
+                    endPos++;
+                if (endPos > cursorPos)
+                {
+                    var killed = sb.ToString(cursorPos, endPos - cursorPos);
+                    _killRing.Add(killed);
+                    _killRingIndex = _killRing.Count - 1;
+                    sb.Remove(cursorPos, endPos - cursorPos);
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                _yankActive = false;
+                continue;
+            }
+
+            // ─── Alt+Backspace — Delete word backward (push to kill ring) ───
+            if (key.Key == ConsoleKey.Backspace && key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+            {
+                var startPos = cursorPos;
+                while (startPos > 0 && char.IsWhiteSpace(sb[startPos - 1]))
+                    startPos--;
+                while (startPos > 0 && !char.IsWhiteSpace(sb[startPos - 1]))
+                    startPos--;
+                if (startPos < cursorPos)
+                {
+                    var killed = sb.ToString(startPos, cursorPos - startPos);
+                    _killRing.Add(killed);
+                    _killRingIndex = _killRing.Count - 1;
+                    sb.Remove(startPos, cursorPos - startPos);
+                    cursorPos = startPos;
+                    RedisplayLine(startLeft, sb, cursorPos);
+                }
+                _yankActive = false;
+                continue;
+            }
+
             // ─── Tab — Completion ───
             if (key.Key == ConsoleKey.Tab)
             {
@@ -1110,6 +1569,7 @@ public sealed class RadianceShell
             // ─── Normal character ───
             if (!char.IsControl(key.KeyChar))
             {
+                _yankActive = false;
                 sb.Insert(cursorPos, key.KeyChar);
                 cursorPos++;
                 RedisplayLine(startLeft, sb, cursorPos);
@@ -1125,27 +1585,43 @@ public sealed class RadianceShell
     /// <param name="startLeft">The starting column position of the input.</param>
     /// <param name="sb">The input buffer.</param>
     /// <param name="cursorPos">The desired cursor position within the buffer.</param>
-    private static void RedisplayLine(int startLeft, StringBuilder sb, int cursorPos)
+    private void RedisplayLine(int startLeft, StringBuilder sb, int cursorPos)
     {
         var text = sb.ToString();
 
         // Move cursor to start position, write text, clear any remaining old content
         Console.SetCursorPosition(startLeft, Console.CursorTop);
-        Console.Write(text);
+        if (_syntaxHighlighting)
+        {
+            var highlighted = InputHighlighter.Highlight(text);
+            Console.Write(highlighted);
+        }
+        else
+        {
+            Console.Write(text);
+        }
         Console.Write("\x1b[K"); // ANSI: clear from cursor to end of line
 
-        // Position cursor
+        // Position cursor — always use raw text position
         SetCursorPosition(startLeft, sb, cursorPos);
     }
 
     /// <summary>
     /// Redisplays the line and returns the new startLeft (used after Ctrl+R which re-renders prompt).
     /// </summary>
-    private static int RedisplayLineGetStartLeft(int startLeft, StringBuilder sb, int cursorPos)
+    private int RedisplayLineGetStartLeft(int startLeft, StringBuilder sb, int cursorPos)
     {
         var text = sb.ToString();
         Console.SetCursorPosition(startLeft, Console.CursorTop);
-        Console.Write(text);
+        if (_syntaxHighlighting)
+        {
+            var highlighted = InputHighlighter.Highlight(text);
+            Console.Write(highlighted);
+        }
+        else
+        {
+            Console.Write(text);
+        }
         Console.Write("\x1b[K"); // ANSI: clear from cursor to end of line
         SetCursorPosition(startLeft, sb, cursorPos);
         return startLeft;
@@ -1341,11 +1817,22 @@ public sealed class RadianceShell
         }
         else
         {
-            // File/directory completion
+            // Argument completion — check for registered completion spec
             var commandName = GetCommandName(input);
-            var dirsOnly = commandName is "cd" or "pushd" or "popd" or "rmdir" or "mkdir";
-            var matches = CompletePath(prefix, dirsOnly);
-            ApplyCompletion(matches, sb, ref cursorPos, ref startLeft, wordStart, prefix);
+            var spec = !string.IsNullOrEmpty(commandName) ? _context.GetCompletion(commandName) : null;
+
+            if (spec is not null)
+            {
+                var matches = GetCompletionMatches(spec, prefix);
+                ApplyCompletion(matches, sb, ref cursorPos, ref startLeft, wordStart, prefix);
+            }
+            else
+            {
+                // Default file/directory completion
+                var dirsOnly = commandName is "cd" or "pushd" or "popd" or "rmdir" or "mkdir";
+                var matches = CompletePath(prefix, dirsOnly);
+                ApplyCompletion(matches, sb, ref cursorPos, ref startLeft, wordStart, prefix);
+            }
         }
     }
 
@@ -1356,6 +1843,69 @@ public sealed class RadianceShell
     /// <param name="prefix">The path prefix to complete.</param>
     /// <param name="dirsOnly">If true, only return directories.</param>
     /// <returns>A list of matching completions.</returns>
+    /// <summary>
+    /// Gets completion matches based on a registered completion spec.
+    /// </summary>
+    private List<string> GetCompletionMatches(CompletionSpec spec, string prefix)
+    {
+        var matches = new List<string>();
+
+        switch (spec.Type)
+        {
+            case CompletionType.Commands:
+                foreach (var name in _builtins.CommandNames)
+                    if (name.StartsWith(prefix, StringComparison.Ordinal))
+                        matches.Add(name);
+                foreach (var name in _context.FunctionNames)
+                    if (name.StartsWith(prefix, StringComparison.Ordinal) && !matches.Contains(name))
+                        matches.Add(name);
+                foreach (var name in GetPathExecutables())
+                    if (name.StartsWith(prefix, StringComparison.Ordinal) && !matches.Contains(name))
+                        matches.Add(name);
+                break;
+
+            case CompletionType.Files:
+                matches = CompletePath(prefix, false);
+                break;
+
+            case CompletionType.Directories:
+                matches = CompletePath(prefix, true);
+                break;
+
+            case CompletionType.Words:
+                if (spec.WordList is not null)
+                    foreach (var word in spec.WordList)
+                        if (word.StartsWith(prefix, StringComparison.Ordinal))
+                            matches.Add(word);
+                break;
+
+            case CompletionType.GlobPattern:
+                if (spec.GlobPattern is not null)
+                {
+                    var expanded = Expansion.GlobExpander.Expand(spec.GlobPattern, _context.Options);
+                    foreach (var match in expanded)
+                        if (match.StartsWith(prefix, StringComparison.Ordinal))
+                            matches.Add(match);
+                }
+                break;
+
+            case CompletionType.Function:
+                // Function-based completion — execute the function with COMP_* vars
+                if (spec.FunctionName is not null && _context.HasFunction(spec.FunctionName))
+                {
+                    // Set COMP_WORDS and COMP_CWORD (simplified)
+                    _context.SetVariable("COMP_WORDS", prefix);
+                    _context.SetVariable("COMP_CWORD", "0");
+                    // Execute function — results would be in a special variable
+                    // For now, fall back to default file completion
+                    matches = CompletePath(prefix, false);
+                }
+                break;
+        }
+
+        return matches;
+    }
+
     private List<string> CompletePath(string prefix, bool dirsOnly)
     {
         var matches = new List<string>();
@@ -1580,30 +2130,28 @@ public sealed class RadianceShell
                 cursorPos = wordStart + commonPrefix.Length;
                 RedisplayLine(startLeft, sb, cursorPos);
             }
-            else
-            {
-                // Show all matches in columns
-                Console.WriteLine();
-                var maxNameLen = matches.Max(m => m.Length) + 2;
-                var cols = Math.Max(1, Console.WindowWidth / maxNameLen);
-                var i = 0;
-                foreach (var match in matches)
-                {
-                    Console.Write(match.PadRight(maxNameLen));
-                    i++;
-                    if (i % cols == 0)
-                        Console.WriteLine();
-                }
-                if (i % cols != 0)
-                    Console.WriteLine();
 
-                // Re-display prompt and current input
-                var prompt = Prompt.Render(_context);
-                Console.Write(prompt);
-                startLeft = Console.CursorLeft;
-                Console.Write(sb.ToString());
-                SetCursorPosition(startLeft, sb, cursorPos);
+            // Show all matches in numbered columns
+            Console.WriteLine();
+            var maxNameLen = matches.Max(m => m.Length) + 4;
+            var cols = Math.Max(1, Console.WindowWidth / maxNameLen);
+            var idx = 0;
+            foreach (var match in matches)
+            {
+                Console.Write($"{idx + 1}){match}".PadRight(maxNameLen));
+                idx++;
+                if (idx % cols == 0)
+                    Console.WriteLine();
             }
+            if (idx % cols != 0)
+                Console.WriteLine();
+
+            // Re-display prompt and current input
+            var prompt = RenderThemePrompt();
+            Console.Write(prompt);
+            startLeft = Console.CursorLeft;
+            Console.Write(sb.ToString());
+            SetCursorPosition(startLeft, sb, cursorPos);
         }
     }
 
@@ -1637,6 +2185,13 @@ public sealed class RadianceShell
     /// </summary>
     private string RenderThemePrompt()
     {
+        // Check for PS1 variable — if set, use it instead of theme
+        var ps1 = _context.GetVariable("PS1");
+        if (!string.IsNullOrEmpty(ps1))
+        {
+            return PromptExpander.Expand(ps1, _context, _history.Count, _sessionStats.CommandCount);
+        }
+
         var ctx = BuildPromptContext();
         var leftPrompt = _themeManager.RenderPrompt(ctx);
         var rightPrompt = _themeManager.RenderRightPrompt(ctx);
@@ -1689,6 +2244,10 @@ public sealed class RadianceShell
         context.SetVariable("SHELL", "radiance");
         context.SetVariable("RADIANCE_VERSION", Version);
 
+        // Default prompt variables (PS1 is left empty — theme system provides the prompt)
+        context.SetVariable("PS2", "> ");
+        context.SetVariable("PS4", "+ ");
+
         // Export key variables
         context.ExportVariable("PATH");
         context.ExportVariable("HOME");
@@ -1700,16 +2259,33 @@ public sealed class RadianceShell
     }
 
     /// <summary>
-    /// Prints the welcome banner.
+    /// Prints the welcome banner using DaVinci rendering.
+    /// Falls back to simple Console output if terminal doesn't support alt screen.
     /// </summary>
-    private static void PrintWelcome()
+    private void PrintWelcome()
     {
-        Console.WriteLine();
-        Console.WriteLine("\x1b[1;36m  ╭─────────────────────────────────╮\x1b[0m");
-        Console.WriteLine($"\x1b[1;36m  │  \x1b[1;33m✦ Radiance Shell v{Version} ✦\x1b[1;36m      │\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  │  \x1b[37mA BASH interpreter in C#\x1b[1;36m       │\x1b[0m");
-        Console.WriteLine("\x1b[1;36m  ╰─────────────────────────────────╯\x1b[0m");
-        Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try \x1b[1;33m'radiance'\x1b[0m\x1b[37m for fun, \x1b[1;33m'agent'\x1b[0m\x1b[37m for AI help!\x1b[0m");
-        Console.WriteLine();
+        if (Console.IsOutputRedirected || Console.IsInputRedirected)
+        {
+            // Fallback for piped/redirected mode
+            Console.WriteLine();
+            Console.WriteLine($"\x1b[1;33m  ✦ Radiance Shell v{Version} ✦\x1b[0m");
+            Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun, 'agent' for AI help!\x1b[0m");
+            Console.WriteLine();
+            return;
+        }
+
+        try
+        {
+            _daVinci.ShowStaticView((buf, w, h) =>
+                DaVinciViewBuilder.RenderWelcomeBanner(buf, w, h, Version));
+        }
+        catch
+        {
+            // Fallback if alt screen buffer is not supported
+            Console.WriteLine();
+            Console.WriteLine($"\x1b[1;33m  ✦ Radiance Shell v{Version} ✦\x1b[0m");
+            Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun, 'agent' for AI help!\x1b[0m");
+            Console.WriteLine();
+        }
     }
 }

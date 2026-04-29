@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
+using Radiance.Interpreter;
 
 namespace Radiance.Expansion;
 
@@ -8,18 +9,8 @@ namespace Radiance.Expansion;
 /// Performs filename generation (glob expansion) on shell words.
 /// Expands patterns containing <c>*</c>, <c>?</c>, and <c>[...]</c> into
 /// matching filenames from the filesystem.
-/// <para>
-/// BASH glob behavior:
-/// <list type="bullet">
-/// <item><c>*</c> matches any sequence of characters (except leading <c>.</c>)</item>
-/// <item><c>?</c> matches any single character (except leading <c>.</c>)</item>
-/// <item><c>[abc]</c> matches any character in the set</item>
-/// <item><c>[a-z]</c> matches any character in the range</item>
-/// <item><c>[!abc]</c> or <c>[^abc]</c> matches any character NOT in the set</item>
-/// <item>If no matches found, the original pattern is returned (literal)</item>
-/// <item>Files starting with <c>.</c> only match if the pattern explicitly starts with <c>.</c></item>
-/// </list>
-/// </para>
+/// With extglob enabled, also supports extended glob patterns:
+/// <c>?(pattern)</c>, <c>*(pattern)</c>, <c>+(pattern)</c>, <c>@(pattern)</c>, <c>!(pattern)</c>.
 /// </summary>
 public sealed class GlobExpander
 {
@@ -34,14 +25,15 @@ public sealed class GlobExpander
     /// list containing the original text.
     /// </summary>
     /// <param name="text">The text potentially containing glob patterns.</param>
+    /// <param name="options">Shell options (for extglob support). Null = no extglob.</param>
     /// <returns>A list of expanded filenames, or the original text if no expansion occurred.</returns>
-    public static List<string> Expand(string text)
+    public static List<string> Expand(string text, ShellOptions? options = null)
     {
         if (string.IsNullOrEmpty(text))
             return [text];
 
         // Check if the text contains any glob characters
-        if (!ContainsGlobChars(text))
+        if (!ContainsGlobChars(text) && !(options?.ExtGlob == true && ContainsExtGlobChars(text)))
             return [text];
 
         // Determine the directory and pattern
@@ -70,12 +62,12 @@ public sealed class GlobExpander
             return [text];
 
         // Check if pattern itself has glob chars
-        if (!ContainsGlobChars(pattern))
+        if (!ContainsGlobChars(pattern) && !(options?.ExtGlob == true && ContainsExtGlobChars(pattern)))
             return [text];
 
         try
         {
-            var matches = MatchFiles(dir, pattern);
+            var matches = MatchFiles(dir, pattern, options);
 
             if (matches.Count == 0)
             {
@@ -133,14 +125,14 @@ public sealed class GlobExpander
     /// <summary>
     /// Matches files in the given directory against the glob pattern.
     /// </summary>
-    private static List<string> MatchFiles(string dir, string pattern)
+    private static List<string> MatchFiles(string dir, string pattern, ShellOptions? options = null)
     {
         var matches = new List<string>();
 
         if (!Directory.Exists(dir))
             return matches;
 
-        var regex = GlobToRegex(pattern);
+        var regex = GlobToRegex(pattern, options);
         var mustMatchDot = pattern.StartsWith('.');
 
         try
@@ -172,9 +164,27 @@ public sealed class GlobExpander
     }
 
     /// <summary>
-    /// Converts a glob pattern to a <see cref="Regex"/> for matching.
+    /// Checks if the text contains extended glob characters (extglob patterns).
+    /// Extglob patterns: ?(...), *(...), +(...), @(...), !(...)
     /// </summary>
-    private static Regex GlobToRegex(string pattern)
+    internal static bool ContainsExtGlobChars(string text)
+    {
+        for (var i = 0; i + 1 < text.Length; i++)
+        {
+            if (text[i] is '?' or '*' or '+' or '@' or '!')
+            {
+                if (text[i + 1] == '(')
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Converts a glob pattern to a <see cref="Regex"/> for matching.
+    /// Supports extended glob patterns when extglob is enabled.
+    /// </summary>
+    private static Regex GlobToRegex(string pattern, ShellOptions? options = null)
     {
         var sb = new StringBuilder();
         sb.Append('^');
@@ -238,6 +248,45 @@ public sealed class GlobExpander
                     sb.Append(c);
                     break;
 
+                // Extglob patterns: ?(...), *(...), +(...), @(...), !(...)
+                case '?' or '*' or '+' or '@' or '!' when options?.ExtGlob == true && i + 1 < pattern.Length && pattern[i + 1] == '(':
+                {
+                    // Find the matching closing paren
+                    var parenDepth = 1;
+                    var j = i + 2;
+                    while (j < pattern.Length && parenDepth > 0)
+                    {
+                        if (pattern[j] == '(') parenDepth++;
+                        else if (pattern[j] == ')') parenDepth--;
+                        if (parenDepth > 0) j++;
+                    }
+
+                    var innerPattern = pattern[(i + 2)..j];
+                    var innerRegex = ConvertInnerPattern(innerPattern);
+
+                    switch (c)
+                    {
+                        case '?': // Zero or one occurrence
+                            sb.Append($"({innerRegex})?");
+                            break;
+                        case '*': // Zero or more occurrences
+                            sb.Append($"({innerRegex})*");
+                            break;
+                        case '+': // One or more occurrences
+                            sb.Append($"({innerRegex})+");
+                            break;
+                        case '@': // Exactly one occurrence
+                            sb.Append($"({innerRegex})");
+                            break;
+                        case '!': // Match anything except
+                            sb.Append($"(?:(?!{innerRegex}).)*");
+                            break;
+                    }
+
+                    i = j; // Skip past closing paren
+                    break;
+                }
+
                 default:
                     sb.Append(c);
                     break;
@@ -249,6 +298,43 @@ public sealed class GlobExpander
         sb.Append('$');
 
         var patternStr = sb.ToString();
-        return RegexCache.GetOrAdd(pattern, _ => new Regex(patternStr, RegexOptions.None));
+        var cacheKey = options?.ExtGlob == true ? $"ext:{pattern}" : pattern;
+        return RegexCache.GetOrAdd(cacheKey, _ => new Regex(patternStr, RegexOptions.None));
+    }
+
+    /// <summary>
+    /// Converts the inner pattern of an extglob expression.
+    /// Handles pipe-separated alternatives: (a|b|c) → a|b|c
+    /// </summary>
+    private static string ConvertInnerPattern(string inner)
+    {
+        // Split by | for alternation, convert each part as a glob pattern
+        var parts = inner.Split('|');
+        var converted = parts.Select(p =>
+        {
+            // Simple conversion: escape regex-special chars except glob chars
+            var sb = new StringBuilder();
+            foreach (var c in p)
+            {
+                switch (c)
+                {
+                    case '*':
+                        sb.Append(".*");
+                        break;
+                    case '?':
+                        sb.Append('.');
+                        break;
+                    case '.' or '\\' or '(' or ')' or '{' or '}' or '+' or '^' or '$' or '|':
+                        sb.Append('\\');
+                        sb.Append(c);
+                        break;
+                    default:
+                        sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+        });
+        return string.Join("|", converted);
     }
 }

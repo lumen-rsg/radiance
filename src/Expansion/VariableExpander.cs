@@ -96,7 +96,7 @@ public sealed class VariableExpander
 
             case '-':
                 // $- — shell options
-                return (context.ShellOptions, 2);
+                return (context.Options.OptionString, 2);
 
             case '0':
                 // $0 — shell name
@@ -159,8 +159,8 @@ public sealed class VariableExpander
         var i = start;
         var name = new StringBuilder();
 
-        // Read the variable name
-        while (i < text.Length && text[i] != '}' && text[i] != ':' && text[i] != '=' && text[i] != '+' && text[i] != '#')
+        // Read the variable name (stop at }, :, =, +, #, [)
+        while (i < text.Length && text[i] != '}' && text[i] != ':' && text[i] != '=' && text[i] != '+' && text[i] != '#' && text[i] != '[')
         {
             name.Append(text[i]);
             i++;
@@ -169,27 +169,78 @@ public sealed class VariableExpander
         var varName = name.ToString();
         var innerConsumed = i - start;
 
+        // Handle array subscript: ${VAR[@]}, ${VAR[*]}, ${VAR[idx]}
+        if (i < text.Length && text[i] == '[')
+        {
+            i++; // skip [
+            var subscript = new StringBuilder();
+            while (i < text.Length && text[i] != ']')
+            {
+                subscript.Append(text[i]);
+                i++;
+            }
+            if (i < text.Length) i++; // skip ]
+            if (i < text.Length) i++; // skip }
+
+            var sub = subscript.ToString();
+            if (sub == "@")
+            {
+                // ${VAR[@]} — all array elements, space-separated
+                var arr = context.GetArrayVariable(varName);
+                return (arr is not null ? string.Join(" ", arr) : "", i - start);
+            }
+            if (sub == "*")
+            {
+                // ${VAR[*]} — all array elements, IFS-joined
+                var arr = context.GetArrayVariable(varName);
+                return (arr is not null ? string.Join(" ", arr) : "", i - start);
+            }
+            // Numeric index
+            if (int.TryParse(sub, out var idx))
+            {
+                return (context.GetArrayElement(varName, idx), i - start);
+            }
+            return ("", i - start);
+        }
+
         // Check for parameter expansion operators: ${VAR:-default}, ${VAR:=default}, ${VAR:+alt}, ${VAR##pattern}, etc.
         if (i < text.Length && text[i] != '}')
         {
             var op = text[i];
 
-            // Handle ${#VAR} — string length
+            // Handle ${#VAR} — string length or ${#VAR[@]} array count
             if (op == '#' && varName == "")
             {
                 // ${#VAR} — length of VAR's value
                 name.Clear();
                 i++; // skip #
-                while (i < text.Length && text[i] != '}')
+                while (i < text.Length && text[i] != '}' && text[i] != '[')
                 {
                     name.Append(text[i]);
                     i++;
                 }
 
-                // skip closing }
                 var lenVarName = name.ToString();
+
+                // Check for ${#VAR[@]} or ${#VAR[*]} — array element count
+                if (i < text.Length && text[i] == '[')
+                {
+                    i++; // skip [
+                    var sub = new StringBuilder();
+                    while (i < text.Length && text[i] != ']')
+                    {
+                        sub.Append(text[i]);
+                        i++;
+                    }
+                    if (i < text.Length) i++; // skip ]
+                    if (i < text.Length) i++; // skip }
+                    return (context.GetArrayLength(lenVarName).ToString(), i - start);
+                }
+
+                // skip closing }
                 var lenValue = context.GetVariable(lenVarName);
-                return (lenValue.Length.ToString(), i - start + 1);
+                if (i < text.Length) i++; // skip }
+                return (lenValue.Length.ToString(), i - start);
             }
 
             // ${VAR:-default} — use default if unset or empty

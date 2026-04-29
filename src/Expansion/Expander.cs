@@ -9,7 +9,7 @@ namespace Radiance.Expansion;
 /// The main expansion engine that orchestrates all expansion phases in the correct order.
 /// Implements the BASH expansion order:
 /// <list type="number">
-/// <item>Brace expansion (Phase 6 — not yet implemented)</item>
+/// <item>Brace expansion</item>
 /// <item>Tilde expansion</item>
 /// <item>Parameter/variable expansion</item>
 /// <item>Command substitution</item>
@@ -22,6 +22,8 @@ namespace Radiance.Expansion;
 public sealed class Expander
 {
     private readonly ShellContext _context;
+    private readonly BuiltinRegistry _builtins;
+    private readonly ProcessManager _processManager;
     private readonly CommandSubstitution _commandSubstitution;
     private readonly ArithmeticExpander _arithmeticExpander;
 
@@ -34,6 +36,8 @@ public sealed class Expander
     public Expander(ShellContext context, BuiltinRegistry builtins, ProcessManager processManager)
     {
         _context = context;
+        _builtins = builtins;
+        _processManager = processManager;
         _commandSubstitution = new CommandSubstitution(context, builtins, processManager, this);
         _arithmeticExpander = new ArithmeticExpander(context);
     }
@@ -66,7 +70,9 @@ public sealed class Expander
             }
 
             // Track if any unquoted part has glob characters
-            if (!skipGlob && part.Quoting == WordQuoting.None && GlobExpander.ContainsGlobChars(expanded))
+            if (!skipGlob && !_context.Options.NoGlob && part.Quoting == WordQuoting.None
+                && (GlobExpander.ContainsGlobChars(expanded)
+                    || (_context.Options.ExtGlob && GlobExpander.ContainsExtGlobChars(expanded))))
             {
                 hasGlobChars = true;
             }
@@ -85,7 +91,7 @@ public sealed class Expander
         // Phase 3: Glob expansion (only for unquoted words with glob characters)
         if (hasGlobChars)
         {
-            return GlobExpander.Expand(result);
+            return GlobExpander.Expand(result, _context.Options);
         }
 
         return [result];
@@ -104,9 +110,61 @@ public sealed class Expander
 
         foreach (var word in words)
         {
-            var expanded = ExpandWord(word);
-            result.AddRange(expanded);
+            // Phase 0: Brace expansion (before all other expansions)
+            // Only applies to unquoted parts
+            var braceExpanded = ExpandBraceInWord(word);
+
+            foreach (var braceWord in braceExpanded)
+            {
+                var expanded = ExpandWord(braceWord);
+                result.AddRange(expanded);
+            }
         }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Applies brace expansion to a word's parts.
+    /// Only expands unquoted parts that contain { (not preceded by $).
+    /// Returns one or more word part lists.
+    /// </summary>
+    private List<List<WordPart>> ExpandBraceInWord(List<WordPart> parts)
+    {
+        // Check if any unquoted part contains { that could be brace expansion
+        var hasBrace = false;
+        foreach (var part in parts)
+        {
+            if (part.Quoting == WordQuoting.None && part.Text.Contains('{'))
+            {
+                hasBrace = true;
+                break;
+            }
+        }
+
+        if (!hasBrace)
+            return [parts];
+
+        // Reconstruct the raw text for brace expansion
+        var sb = new StringBuilder();
+        foreach (var part in parts)
+        {
+            if (part.Quoting == WordQuoting.None)
+                sb.Append(part.Text);
+            else
+                return [parts]; // Quoted parts with braces — don't expand
+        }
+
+        var rawText = sb.ToString();
+        var expanded = BraceExpander.Expand(rawText);
+
+        if (expanded.Count == 1 && expanded[0] == rawText)
+            return [parts]; // No expansion happened
+
+        // Convert each expanded string back to a word part list
+        var result = new List<List<WordPart>>();
+        foreach (var str in expanded)
+            result.Add([new WordPart(str)]);
 
         return result;
     }
@@ -116,6 +174,12 @@ public sealed class Expander
     /// </summary>
     private string ExpandPart(WordPart part)
     {
+        // Handle process substitution: <(cmd) or >(cmd)
+        if (part.ProcessSubstitutionCommand is not null)
+        {
+            return ExpandProcessSubstitution(part.ProcessSubstitutionCommand, part.IsOutputSubstitution);
+        }
+
         return part.Quoting switch
         {
             // Single-quoted: no expansion at all
@@ -132,6 +196,58 @@ public sealed class Expander
 
             _ => part.Text,
         };
+    }
+
+    /// <summary>
+    /// Expands a process substitution by executing the inner command
+    /// and returning the path to a temp file containing the output.
+    /// </summary>
+    private string ExpandProcessSubstitution(string command, bool isOutput)
+    {
+        try
+        {
+            // For input substitution <(cmd): execute command, capture output to temp file
+            // For output substitution >(cmd): create temp file for writing
+            var tempFile = Path.GetTempFileName();
+
+            if (!isOutput)
+            {
+                // Execute the command and write output to temp file
+                var captured = new System.IO.StringWriter();
+                var originalOut = Console.Out;
+                Utils.OutputCapture.Push();
+                try
+                {
+                    Console.SetOut(captured);
+
+                    var lexer = new Lexer.Lexer(command);
+                    var tokens = lexer.Tokenize();
+                    var parser = new Parser.Parser(tokens);
+                    var ast = parser.Parse();
+
+                    if (ast is not null)
+                    {
+                        var interpreter = new ShellInterpreter(_context, _builtins, _processManager, this);
+                        _context.LastExitCode = interpreter.Execute(ast);
+                    }
+                }
+                finally
+                {
+                    Console.SetOut(originalOut);
+                    Utils.OutputCapture.Pop();
+                }
+
+                var output = captured.ToString().TrimEnd('\n', '\r');
+                File.WriteAllText(tempFile, output);
+            }
+
+            return tempFile;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"radiance: process substitution failed: {ex.Message}");
+            return "/dev/null";
+        }
     }
 
     /// <summary>

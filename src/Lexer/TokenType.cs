@@ -26,6 +26,15 @@ public enum TokenType
     /// <summary>Redirect stdin: <</summary>
     LessThan,
 
+    /// <summary>Here-document: &lt;&lt;</summary>
+    DoubleLessThan,
+
+    /// <summary>Here-document strip tabs: &lt;&lt;-</summary>
+    DoubleLessThanDash,
+
+    /// <summary>Here-string: &lt;&lt;&lt;</summary>
+    TripleLessThan,
+
     /// <summary>Append stdout: >></summary>
     DoubleGreaterThan,
 
@@ -67,6 +76,12 @@ public enum TokenType
 
     /// <summary>A comment (ignored by the parser).</summary>
     Comment,
+
+    /// <summary>Process substitution input: &lt;(cmd)</summary>
+    ProcessSubIn,
+
+    /// <summary>Process substitution output: &gt;(cmd)</summary>
+    ProcessSubOut,
 
     /// <summary>End of input.</summary>
     Eof,

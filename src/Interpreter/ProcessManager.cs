@@ -12,6 +12,11 @@ namespace Radiance.Interpreter;
 public sealed class ProcessManager
 {
     /// <summary>
+    /// Optional signal handler for forwarding SIGINT to child processes.
+    /// Set by the shell during initialization.
+    /// </summary>
+    public SignalHandler? SignalHandler { get; set; }
+    /// <summary>
     /// Executes an external command by name with the given arguments.
     /// Automatically detects whether Console.Out has been redirected (e.g., during
     /// command substitution) and uses piped mode to capture output. Otherwise,
@@ -79,9 +84,20 @@ public sealed class ProcessManager
             {
                 var startInfo = BuildTerminalStartInfo(resolved, args, context);
                 using var process = new Process { StartInfo = startInfo };
-                process.Start();
-                process.WaitForExit();
-                return process.ExitCode;
+
+                // Set as foreground process for SIGINT forwarding
+                SignalHandler?.ForegroundProcess = process;
+                try
+                {
+                    process.Start();
+                    process.WaitForExit();
+                    return process.ExitCode;
+                }
+                finally
+                {
+                    if (SignalHandler is not null)
+                        SignalHandler.ForegroundProcess = null;
+                }
             }
         }
         catch (System.ComponentModel.Win32Exception ex)

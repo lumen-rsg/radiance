@@ -167,11 +167,16 @@ public sealed class TerminalBuffer
 
         for (var y = 0; y < Height; y++)
         {
-            builder.Move(y + 1, 1);
+            var cursorCol = -1; // 0-based column where the ANSI cursor currently sits
+
             for (var x = 0; x < Width; x++)
             {
                 var cell = _cells[x, y];
                 if (cell.Character == ' ' && cell.Style.Equals(TextStyle.Empty)) continue;
+
+                // Reposition cursor when there's a gap from the last written cell
+                if (cursorCol != x)
+                    builder.Move(y + 1, x + 1);
 
                 if (!cell.Style.Equals(TextStyle.Empty))
                 {
@@ -183,6 +188,8 @@ public sealed class TerminalBuffer
                 {
                     builder.Text(cell.Character);
                 }
+
+                cursorCol = x + cell.DisplayWidth;
             }
         }
 

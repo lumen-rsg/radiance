@@ -104,6 +104,21 @@ public sealed class BuiltinRegistry
         registry.Register(new RadianceCommand());
         registry.Register(new AgentCommand());
         registry.Register(new ExecCommand());
+        registry.Register(new ShiftCommand());
+        registry.Register(new EvalCommand());
+        registry.Register(new WaitCommand());
+        registry.Register(new TrapCommand());
+        registry.Register(new HashCommand());
+        registry.Register(new UmaskCommand());
+        registry.Register(new BgCommand());
+        registry.Register(new DisownCommand());
+        registry.Register(new DeclareCommand());
+        registry.Register(new DeclareCommand("typeset"));
+        registry.Register(new ReadonlyCommand());
+        registry.Register(new ShoptCommand());
+        registry.Register(new GetoptsCommand());
+        registry.Register(new CoprocCommand());
+        registry.Register(new CompleteCommand());
         return registry;
     }
 }

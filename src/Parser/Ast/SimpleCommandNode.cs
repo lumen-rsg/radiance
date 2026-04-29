@@ -15,6 +15,11 @@ public sealed record SimpleCommandNode : AstNode
     public List<AssignmentNode> Assignments { get; init; } = [];
 
     /// <summary>
+    /// Array variable assignments preceding the command (e.g., ARR=(a b c)).
+    /// </summary>
+    public List<ArrayAssignmentNode> ArrayAssignments { get; init; } = [];
+
+    /// <summary>
     /// The command words (command name + arguments), before expansion.
     /// Each word is a list of <see cref="WordPart"/> segments preserving quoting context.
     /// </summary>

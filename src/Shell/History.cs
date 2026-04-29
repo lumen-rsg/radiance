@@ -103,6 +103,113 @@ public sealed class History
     }
 
     /// <summary>
+    /// Gets the most recent history entry that starts with the given prefix.
+    /// </summary>
+    public string? GetEntryByPrefix(string prefix)
+    {
+        for (var i = _entries.Count - 1; i >= 0; i--)
+        {
+            if (_entries[i].StartsWith(prefix, StringComparison.Ordinal))
+                return _entries[i];
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the most recent history entry that contains the given substring.
+    /// </summary>
+    public string? GetEntryBySubstring(string substring)
+    {
+        for (var i = _entries.Count - 1; i >= 0; i--)
+        {
+            if (_entries[i].Contains(substring, StringComparison.Ordinal))
+                return _entries[i];
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the last argument of the most recent history entry.
+    /// Returns empty string if no history.
+    /// </summary>
+    public string GetLastArg()
+    {
+        if (_entries.Count == 0)
+            return string.Empty;
+
+        var parts = SplitIntoArgs(_entries[^1]);
+        return parts.Count > 0 ? parts[^1] : string.Empty;
+    }
+
+    /// <summary>
+    /// Gets the first argument of the most recent history entry.
+    /// Returns empty string if no history.
+    /// </summary>
+    public string GetFirstArg()
+    {
+        if (_entries.Count == 0)
+            return string.Empty;
+
+        var parts = SplitIntoArgs(_entries[^1]);
+        return parts.Count > 1 ? parts[1] : string.Empty;
+    }
+
+    /// <summary>
+    /// Gets all arguments (excluding command name) of the most recent history entry.
+    /// </summary>
+    public List<string> GetAllArgs()
+    {
+        if (_entries.Count == 0)
+            return [];
+
+        var parts = SplitIntoArgs(_entries[^1]);
+        return parts.Count > 1 ? parts[1..] : [];
+    }
+
+    /// <summary>
+    /// Splits a command string into arguments, respecting quoted strings.
+    /// </summary>
+    private static List<string> SplitIntoArgs(string command)
+    {
+        var args = new List<string>();
+        var current = new System.Text.StringBuilder();
+        var inSingleQuote = false;
+        var inDoubleQuote = false;
+
+        foreach (var c in command)
+        {
+            if (c == '\'' && !inDoubleQuote)
+            {
+                inSingleQuote = !inSingleQuote;
+                continue;
+            }
+
+            if (c == '"' && !inSingleQuote)
+            {
+                inDoubleQuote = !inDoubleQuote;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c) && !inSingleQuote && !inDoubleQuote)
+            {
+                if (current.Length > 0)
+                {
+                    args.Add(current.ToString());
+                    current.Clear();
+                }
+                continue;
+            }
+
+            current.Append(c);
+        }
+
+        if (current.Length > 0)
+            args.Add(current.ToString());
+
+        return args;
+    }
+
+    /// <summary>
     /// Returns all history entries in order.
     /// </summary>
     public IEnumerable<string> GetAll() => _entries;

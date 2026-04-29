@@ -17,7 +17,8 @@ public sealed class ExportCommand : IBuiltinCommand
             // No arguments: list all exported variables
             foreach (var name in context.ExportedVariableNames.OrderBy(n => n))
             {
-                var value = context.GetVariable(name);
+                var variable = context.GetShellVariable(name);
+                var value = variable?.Value ?? string.Empty;
                 Console.WriteLine($"declare -x {name}=\"{value}\"");
             }
 

@@ -21,6 +21,13 @@ public sealed class DaVinciApp : IDisposable
     {
         _terminal = terminal;
         _buffer = new TerminalBuffer(terminal);
+
+        // Handle terminal resize events
+        _terminal.OnResized += size =>
+        {
+            _buffer.Resize(size.Width, size.Height);
+            ForceRender();
+        };
     }
 
     public void Render(VNode root)
@@ -76,6 +83,13 @@ public sealed class DaVinciApp : IDisposable
         {
             while (_running)
             {
+                // Poll for keyboard input (non-blocking)
+                if (Console.KeyAvailable)
+                {
+                    var key = Console.ReadKey(true);
+                    _eventDispatcher.Dispatch(new KeyPressEvent(key.KeyChar, key.Key, key.Modifiers));
+                }
+
                 ForceRender();
                 Thread.Sleep(16); // ~60fps cap
             }

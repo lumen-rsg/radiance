@@ -33,4 +33,16 @@ public interface IAstVisitor<T>
 
     /// <summary>Visits a function definition node.</summary>
     T VisitFunction(FunctionNode node);
+
+    /// <summary>Visits a subshell node (parenthesized command group).</summary>
+    T VisitSubshell(SubshellNode node);
+
+    /// <summary>Visits a brace group node ({ list; } executed in current scope).</summary>
+    T VisitBraceGroup(BraceGroupNode node);
+
+    /// <summary>Visits a select menu loop node.</summary>
+    T VisitSelect(SelectNode node);
+
+    /// <summary>Visits an array assignment node.</summary>
+    T VisitArrayAssignment(ArrayAssignmentNode node);
 }
