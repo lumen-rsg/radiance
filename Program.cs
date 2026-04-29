@@ -1,4 +1,7 @@
-﻿using Radiance.Shell;
+﻿using System.Net.Sockets;
+using Radiance.Multiplexer;
+using Radiance.Shell;
+using Radiance.Terminal;
 using Radiance.Utils;
 
 namespace Radiance;
@@ -124,6 +127,23 @@ public static class Program
             return shell.ExecuteString(command, commandArgs.ToArray());
         }
 
+        // Handle --mux multiplexer mode
+        if (args.Length > 0 && args[0] == "--mux")
+        {
+            return RunMultiplexer(args[1..]);
+        }
+
+        // Handle --mux-daemon (internal: spawned by --mux new)
+        if (args.Length > 0 && args[0] == "--mux-daemon")
+        {
+            if (args.Length < 3)
+            {
+                ColorOutput.WriteError("--mux-daemon: session name and command required");
+                return 1;
+            }
+            return RunMuxDaemon(args[1], args[2]);
+        }
+
         // Handle script file execution
         if (args.Length > 0 && !args[0].StartsWith('-'))
         {
@@ -164,14 +184,179 @@ public static class Program
               radiance -l, --login        Launch as a login shell
               radiance script.sh [args]   Execute a script file
               radiance -c "command"       Execute an inline command
+              radiance --mux              Start terminal multiplexer
+              radiance --mux new          Start multiplexer with session name
               radiance --help             Show this help message
               radiance --version          Show version information
 
             Options:
               -l, --login     Run as a login shell (sources /etc/profile, ~/.bash_profile)
               -c <command>    Execute the given command string
+              --mux           Start tmux-like terminal multiplexer
               -h, --help      Show this help message
               -v, --version   Show version information
             """);
+    }
+
+    /// <summary>
+    /// Run the terminal multiplexer.
+    /// </summary>
+    private static int RunMultiplexer(string[] muxArgs)
+    {
+        var subcommand = muxArgs.Length > 0 ? muxArgs[0] : "new";
+
+        switch (subcommand)
+        {
+            case "new":
+            {
+                var sessionName = muxArgs.Length > 1 && !muxArgs[1].StartsWith('-')
+                    ? muxArgs[1]
+                    : $"radiance-{Environment.GetEnvironmentVariable("USER") ?? "user"}";
+
+                var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/sh";
+
+                // Start the daemon as a background process
+                var daemonExe = Environment.ProcessPath;
+                if (daemonExe is null)
+                {
+                    ColorOutput.WriteError("Cannot determine executable path for daemon");
+                    return 1;
+                }
+
+                // Check if a session with this name already exists
+                var existingSocket = MuxSessionDir.SocketPath(sessionName);
+                if (File.Exists(existingSocket))
+                {
+                    // Try to connect — if it fails, the socket is stale
+                    try
+                    {
+                        using var testSock = new System.Net.Sockets.Socket(
+                            System.Net.Sockets.AddressFamily.Unix,
+                            System.Net.Sockets.SocketType.Stream,
+                            System.Net.Sockets.ProtocolType.Unspecified);
+                        testSock.Connect(new UnixDomainSocketEndPoint(existingSocket));
+                        testSock.Close();
+                        // Connection succeeded — session is alive
+                        ColorOutput.WriteError($"Session '{sessionName}' already exists. Use 'radiance --mux attach {sessionName}' to connect.");
+                        return 1;
+                    }
+                    catch
+                    {
+                        // Stale socket — clean it up
+                        try { File.Delete(existingSocket); } catch { }
+                    }
+                }
+
+                // Spawn daemon process: radiance --mux-daemon <name> <shell>
+                using var daemon = new System.Diagnostics.Process();
+                daemon.StartInfo.FileName = daemonExe;
+                daemon.StartInfo.Arguments = $"--mux-daemon \"{sessionName}\" \"{shell}\"";
+                daemon.StartInfo.UseShellExecute = false;
+                daemon.StartInfo.CreateNoWindow = true;
+
+                if (!daemon.Start())
+                {
+                    ColorOutput.WriteError("Failed to start mux daemon");
+                    return 1;
+                }
+
+                // Give the daemon a moment to create the socket
+                System.Threading.Thread.Sleep(200);
+
+                // Connect as a client
+                using var client = new MuxClient(sessionName);
+                return client.Run();
+            }
+
+            case "ls":
+            {
+                var sessions = MuxSessionDir.ListSessions();
+                if (sessions.Count == 0)
+                {
+                    Console.WriteLine("No active sessions.");
+                    return 0;
+                }
+
+                foreach (var name in sessions)
+                {
+                    var infoPath = MuxSessionDir.InfoPath(name);
+                    string details = "";
+                    if (File.Exists(infoPath))
+                    {
+                        var lines = File.ReadAllLines(infoPath);
+                        if (lines.Length >= 3)
+                        {
+                            var pid = lines[0];
+                            var created = DateTime.Parse(lines[2], null, System.Globalization.DateTimeStyles.RoundtripKind);
+                            details = $" (pid {pid}, created {created:HH:mm:ss})";
+                        }
+                    }
+                    Console.WriteLine($"  {name}{details}");
+                }
+                return 0;
+            }
+
+            case "kill-session":
+            {
+                if (muxArgs.Length < 2)
+                {
+                    ColorOutput.WriteError("kill-session: session name required");
+                    return 1;
+                }
+
+                var targetName = muxArgs[1];
+                var infoPath = MuxSessionDir.InfoPath(targetName);
+                if (!File.Exists(infoPath))
+                {
+                    ColorOutput.WriteError($"No session '{targetName}' found.");
+                    return 1;
+                }
+
+                var lines = File.ReadAllLines(infoPath);
+                if (lines.Length > 0 && int.TryParse(lines[0], out var pid))
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.GetProcessById(pid)?.Kill();
+                        Console.WriteLine($"Killed session '{targetName}' (pid {pid}).");
+                    }
+                    catch (Exception ex)
+                    {
+                        ColorOutput.WriteError($"Failed to kill session: {ex.Message}");
+                    }
+                }
+
+                MuxSessionDir.Cleanup(targetName);
+                return 0;
+            }
+
+            case "attach":
+            {
+                var attachName = muxArgs.Length > 1 ? muxArgs[1]
+                    : $"radiance-{Environment.GetEnvironmentVariable("USER") ?? "user"}";
+
+                using var client = new MuxClient(attachName);
+                return client.Run();
+            }
+
+            default:
+                ColorOutput.WriteError($"Unknown mux subcommand: {subcommand}");
+                Console.WriteLine("Usage: radiance --mux [new [name] | ls | kill-session | attach [name]]");
+                return 1;
+        }
+    }
+
+    /// <summary>
+    /// Run as a mux daemon (background process). Called internally by --mux new.
+    /// </summary>
+    private static int RunMuxDaemon(string sessionName, string command)
+    {
+        using var daemon = new MuxDaemon(sessionName,
+            Console.WindowWidth > 0 ? Console.WindowWidth : 120,
+            Console.WindowHeight > 0 ? Console.WindowHeight : 40,
+            command);
+
+        daemon.Run();
+        return 0;
     }
 }

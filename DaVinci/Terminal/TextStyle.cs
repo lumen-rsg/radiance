@@ -1,6 +1,6 @@
 namespace DaVinci.Terminal;
 
-public sealed class TextStyle : IEquatable<TextStyle>
+public sealed record TextStyle
 {
     public Color? Foreground { get; init; }
     public Color? Background { get; init; }
@@ -38,48 +38,4 @@ public sealed class TextStyle : IEquatable<TextStyle>
         if (Equals(Empty)) return "";
         return "\x1b[0m";
     }
-
-    public bool Equals(TextStyle? other)
-    {
-        if (other is null) return false;
-        if (ReferenceEquals(this, other)) return true;
-
-        if (Bold != other.Bold ||
-            Dim != other.Dim ||
-            Italic != other.Italic ||
-            Underline != other.Underline ||
-            Strikethrough != other.Strikethrough ||
-            Blink != other.Blink ||
-            Reverse != other.Reverse)
-            return false;
-
-        if (Foreground.HasValue != other.Foreground.HasValue) return false;
-        if (Foreground.HasValue && !Foreground.Value.Equals(other.Foreground!.Value)) return false;
-
-        if (Background.HasValue != other.Background.HasValue) return false;
-        if (Background.HasValue && !Background.Value.Equals(other.Background!.Value)) return false;
-
-        return true;
-    }
-
-    public override bool Equals(object? obj) => Equals(obj as TextStyle);
-    public override int GetHashCode()
-    {
-        var hash = new HashCode();
-        hash.Add(Foreground);
-        hash.Add(Background);
-        hash.Add(Bold);
-        hash.Add(Dim);
-        hash.Add(Italic);
-        hash.Add(Underline);
-        hash.Add(Strikethrough);
-        hash.Add(Blink);
-        hash.Add(Reverse);
-        return hash.ToHashCode();
-    }
-
-    public static bool operator ==(TextStyle? left, TextStyle? right) =>
-        left?.Equals(right) ?? right is null;
-    public static bool operator !=(TextStyle? left, TextStyle? right) =>
-        !(left == right);
 }

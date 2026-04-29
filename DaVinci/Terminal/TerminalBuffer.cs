@@ -88,6 +88,39 @@ public sealed class TerminalBuffer
         SetText(col, row, text.AsSpan(), style);
     }
 
+    /// <summary>
+    /// Blit (copy) a rectangular region from a source cell grid into this buffer.
+    /// Source grid is indexed [col, row]. Clips to this buffer's bounds.
+    /// </summary>
+    public void Blit(Cell[,] source, int srcCols, int srcRows, int dstX, int dstY)
+    {
+        var maxCol = Math.Min(srcCols, Width - dstX);
+        var maxRow = Math.Min(srcRows, Height - dstY);
+
+        for (var y = 0; y < maxRow; y++)
+        {
+            if (dstY + y < 0) continue;
+            for (var x = 0; x < maxCol; x++)
+            {
+                if (dstX + x < 0) continue;
+                _cells[dstX + x, dstY + y] = source[x, y];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Blit a horizontal line segment with a single style.
+    /// </summary>
+    public void BlitLine(int dstX, int dstY, ReadOnlySpan<char> text, TextStyle? style = null)
+    {
+        style ??= TextStyle.Empty;
+        for (var i = 0; i < text.Length && dstX + i < Width; i++)
+        {
+            if (dstX + i < 0) continue;
+            SetCell(dstX + i, dstY, Cell.FromChar(text[i], style));
+        }
+    }
+
     public void Clear()
     {
         for (var x = 0; x < Width; x++)
