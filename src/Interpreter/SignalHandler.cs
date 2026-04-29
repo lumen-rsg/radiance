@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Radiance.Interop;
 
 namespace Radiance.Interpreter;
 
@@ -105,6 +106,34 @@ public sealed class SignalHandler
 
         // Run EXIT trap if registered
         RunExitTrap();
+    }
+
+    /// <summary>
+    /// Handles a SIGTSTP signal (Ctrl+Z).
+    /// Forwards the signal to the foreground child process's process group.
+    /// If no foreground process, the signal is ignored.
+    /// </summary>
+    /// <returns>True if the signal was forwarded to a child process.</returns>
+    public bool HandleSigTstp()
+    {
+        if (_traps.TryGetValue("SIGTSTP", out var trapAction) && CommandExecutor is not null)
+        {
+            _ = CommandExecutor(trapAction);
+            return true;
+        }
+
+        if (_foregroundProcess is not null && !_foregroundProcess.HasExited)
+        {
+            try
+            {
+                PosixPty.killpg(_foregroundProcess.Id, PosixPty.SIGTSTP);
+            }
+            catch { }
+
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

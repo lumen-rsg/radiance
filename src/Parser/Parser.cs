@@ -198,7 +198,8 @@ public sealed class Parser
         }
 
         // Check for brace group: { list; }
-        if (Current().Type == TokenType.LBrace)
+        // '{' is a reserved word, so it arrives as a Word token.
+        if (Current().Type == TokenType.Word && Current().Value == "{")
         {
             return ParseBraceGroup();
         }
@@ -540,8 +541,8 @@ public sealed class Parser
             SkipCommentsAndNewlines();
         }
 
-        // Expect {
-        if (Current().Type != TokenType.LBrace)
+        // Expect { (reserved word, arrives as Word token)
+        if (!(Current().Type == TokenType.Word && Current().Value == "{"))
         {
             ReportError($"expected '{{' after function name, got '{Current().Value}' ({Current().Type})");
             return new FunctionNode();
@@ -553,8 +554,8 @@ public sealed class Parser
         // Parse function body (stops at })
         var body = ParseBraceBody();
 
-        // Expect }
-        if (Current().Type == TokenType.RBrace)
+        // Expect } (reserved word, arrives as Word token)
+        if (Current().Type == TokenType.Word && Current().Value == "}")
         {
             Advance();
         }
@@ -580,8 +581,8 @@ public sealed class Parser
         Advance(); // )
         SkipCommentsAndNewlines();
 
-        // Expect {
-        if (Current().Type != TokenType.LBrace)
+        // Expect { (reserved word, arrives as Word token)
+        if (!(Current().Type == TokenType.Word && Current().Value == "{"))
         {
             ReportError($"expected '{{' after '()', got '{Current().Value}' ({Current().Type})");
             return new FunctionNode();
@@ -593,8 +594,8 @@ public sealed class Parser
         // Parse function body (stops at })
         var body = ParseBraceBody();
 
-        // Expect }
-        if (Current().Type == TokenType.RBrace)
+        // Expect } (reserved word, arrives as Word token)
+        if (Current().Type == TokenType.Word && Current().Value == "}")
         {
             Advance();
         }
@@ -618,7 +619,7 @@ public sealed class Parser
         SkipCommentsAndNewlines();
 
         // If we immediately hit }, return an empty body
-        if (Current().Type == TokenType.RBrace)
+        if (IsCloseBrace())
             return new ListNode();
 
         // Parse pipelines until we hit }
@@ -631,7 +632,7 @@ public sealed class Parser
             SkipCommentsAndNewlines();
 
             // Check for closing brace
-            if (Current().Type == TokenType.RBrace || IsAtEnd())
+            if (IsCloseBrace() || IsAtEnd())
                 break;
 
             pipelines.Add(ParseAndOrForBraceBody());
@@ -708,7 +709,7 @@ public sealed class Parser
         }
 
         // Check for brace group
-        if (Current().Type == TokenType.LBrace)
+        if (Current().Type == TokenType.Word && Current().Value == "{")
         {
             return ParseBraceGroup();
         }
@@ -766,8 +767,8 @@ public sealed class Parser
         // Parse the body using the existing brace body parser
         var body = ParseBraceBody();
 
-        // Expect }
-        if (Current().Type == TokenType.RBrace)
+        // Expect } (reserved word, arrives as Word token)
+        if (IsCloseBrace())
         {
             Advance();
         }
@@ -965,6 +966,13 @@ public sealed class Parser
     /// </summary>
     private bool IsWordToken() =>
         Current().Type is TokenType.Word or TokenType.DoubleQuotedString or TokenType.SingleQuotedString;
+
+    /// <summary>
+    /// Checks if the current token is the closing brace reserved word "}".
+    /// Since '{' and '}' are reserved words (not operators), they arrive as Word tokens.
+    /// </summary>
+    private bool IsCloseBrace() =>
+        Current().Type == TokenType.Word && Current().Value == "}";
 
     /// <summary>
     /// Checks if the current token is a keyword that should terminate a simple command.

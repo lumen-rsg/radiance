@@ -222,19 +222,10 @@ public sealed class Lexer
             return token;
         }
 
-        if (c == '{')
-        {
-            var token = MakeToken(TokenType.LBrace, "{");
-            Advance();
-            return token;
-        }
-
-        if (c == '}')
-        {
-            var token = MakeToken(TokenType.RBrace, "}");
-            Advance();
-            return token;
-        }
+        // Note: '{' and '}' are NOT operators — they are reserved words in bash.
+        // They should be part of regular words (e.g. {a,b,c}, {1..5}) so brace
+        // expansion works.  The parser checks for the word "{" in command position
+        // to recognise brace-group compound commands.
 
         // Word — unquoted sequence of non-special characters
         return ReadWord();
@@ -600,7 +591,7 @@ public sealed class Lexer
     /// Checks whether a character terminates an unquoted word.
     /// </summary>
     private static bool IsWordTerminator(char c) =>
-        char.IsWhiteSpace(c) || c is '|' or '&' or ';' or '>' or '<' or '(' or ')' or '{' or '}' or '\n' or '#';
+        char.IsWhiteSpace(c) || c is '|' or '&' or ';' or '>' or '<' or '(' or ')' or '\n' or '#';
 
     /// <summary>
     /// Determines if the word value looks like an assignment (e.g. VAR=value).

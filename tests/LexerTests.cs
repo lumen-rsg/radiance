@@ -132,17 +132,21 @@ public sealed class LexerTests
     }
 
     [Fact]
-    public void LBrace_ReturnsLBraceToken()
+    public void LBrace_ReturnsWordToken()
     {
+        // '{' is a reserved word, not an operator — it tokenizes as a Word
         var tokens = Tokenize("{");
-        Assert.Equal(TokenType.LBrace, tokens[0].Type);
+        Assert.Equal(TokenType.Word, tokens[0].Type);
+        Assert.Equal("{", tokens[0].Value);
     }
 
     [Fact]
-    public void RBrace_ReturnsRBraceToken()
+    public void RBrace_ReturnsWordToken()
     {
+        // '}' is a reserved word, not an operator — it tokenizes as a Word
         var tokens = Tokenize("}");
-        Assert.Equal(TokenType.RBrace, tokens[0].Type);
+        Assert.Equal(TokenType.Word, tokens[0].Type);
+        Assert.Equal("}", tokens[0].Value);
     }
 
     // ──── Comments ────

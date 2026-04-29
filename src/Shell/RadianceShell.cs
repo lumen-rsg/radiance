@@ -783,11 +783,12 @@ public sealed class RadianceShell
                 }
 
                 // Handle { and } as block delimiters for functions
-                if (token.Type == TokenType.LBrace)
+                // '{' and '}' are reserved words, so they arrive as Word tokens
+                if (token.Type == TokenType.Word && token.Value == "{")
                 {
                     stack.Push("{");
                 }
-                else if (token.Type == TokenType.RBrace && stack.Count > 0 && stack.Peek() == "{")
+                else if (token.Type == TokenType.Word && token.Value == "}" && stack.Count > 0 && stack.Peek() == "{")
                 {
                     stack.Pop();
                 }

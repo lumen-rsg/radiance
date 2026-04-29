@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using Radiance.Builtins;
 using Radiance.Expansion;
 using Radiance.Lexer;
@@ -9,10 +10,9 @@ namespace Radiance.Interpreter;
 
 /// <summary>
 /// Orchestrates the execution of multi-command pipelines and file redirections.
-/// Connects processes via anonymous OS pipes for true concurrent execution,
-/// and handles I/O redirection to files.
-/// Supports compound commands (if, for, while, case) in pipelines by capturing
-/// their console output.
+/// Connects stages via OS-level anonymous pipes for true concurrent execution,
+/// with automatic backpressure through kernel pipe buffers.
+/// Handles I/O redirection to files and compound commands in pipelines.
 /// </summary>
 public sealed class PipelineExecutor
 {
@@ -179,211 +179,299 @@ public sealed class PipelineExecutor
 
     /// <summary>
     /// Executes a multi-command pipeline concurrently.
-    /// Each stage runs in its own thread, connected by MemoryStream buffers.
-    /// External processes are started concurrently and their output is captured.
+    /// All stages start simultaneously, connected by OS anonymous pipes.
+    /// External processes get async CopyToAsync bridging. Builtins/functions
+    /// run on dedicated threads with Console.SetOut redirected to the output pipe.
     /// </summary>
     private int ExecutePipeline(List<AstNode> commands)
     {
-        var processCount = commands.Count;
+        var stageCount = commands.Count;
         var lastExitCode = 0;
 
-        // Execute stages sequentially but with streaming data flow.
-        // This is a pragmatic approach: stages run one after another, but
-        // external processes can run concurrently via streaming.
-        byte[]? pipeData = null;
+        // ── 1. Create inter-stage pipes ──
+        // For N stages, create N-1 pipe pairs.
+        // pipe[i] connects stage i's stdout to stage i+1's stdin.
+        var pipeWriters = new AnonymousPipeServerStream?[stageCount]; // stdout for each stage
+        var pipeReaders = new AnonymousPipeClientStream?[stageCount]; // stdin for each stage
 
-        for (var i = 0; i < processCount; i++)
+        for (var i = 0; i < stageCount - 1; i++)
         {
-            var cmd = commands[i];
+            var server = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.None);
+            var client = new AnonymousPipeClientStream(PipeDirection.In, server.GetClientHandleAsString());
+            pipeWriters[i] = server;
+            pipeReaders[i + 1] = client;
+        }
 
-            // Determine stdin for this stage
-            Stream? stdinStream = null;
-            if (i == 0 && cmd is SimpleCommandNode sc0)
+        // ── 2. Apply file redirects for first/last stage ──
+        Stream? firstStdinFile = null;
+        Stream? lastStdoutFile = null;
+        bool lastHasStderrToStdout = false;
+
+        if (commands[0] is SimpleCommandNode sc0)
+        {
+            var stdinFile = GetStdinRedirect(sc0);
+            if (stdinFile is not null)
+                firstStdinFile = new FileStream(stdinFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
+
+        var lastCmd = commands[stageCount - 1];
+        if (lastCmd is SimpleCommandNode scN)
+        {
+            var stdoutRedirect = GetStdoutRedirect(scN);
+            if (stdoutRedirect is not null)
             {
-                var stdinFile = GetStdinRedirect(sc0);
-                if (stdinFile is not null)
-                    stdinStream = new FileStream(stdinFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var (file, append) = stdoutRedirect.Value;
+                lastStdoutFile = new FileStream(file, append ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None);
             }
-            else if (pipeData is not null && pipeData.Length > 0)
+
+            lastHasStderrToStdout = HasStderrToStdoutRedirect(scN);
+        }
+
+        // ── 3. Start all stages concurrently ──
+        var processes = new Process?[stageCount];
+        var stdoutTasks = new Task?[stageCount];
+        var threads = new Thread?[stageCount];
+        var stageErrors = new Exception?[stageCount];
+        var stageExitCodes = new int[stageCount];
+        var completionEvents = new ManualResetEventSlim?[stageCount];
+        var lastStdoutCapture = new MemoryStream?[1]; // Capture for last external stage with no redirect
+
+        try
+        {
+            for (var i = 0; i < stageCount; i++)
             {
-                stdinStream = new MemoryStream(pipeData);
+                var cmd = commands[i];
+                var isFirst = i == 0;
+                var isLast = i == stageCount - 1;
+
+                // Determine stdin and stdout for this stage
+                Stream? stdin = isFirst ? firstStdinFile : pipeReaders[i];
+                Stream? stdout = isLast ? lastStdoutFile : pipeWriters[i];
+
+                if (cmd is not SimpleCommandNode)
+                {
+                    // ── Compound command (if/for/while/case/brace/subshell) ──
+                    completionEvents[i] = new ManualResetEventSlim(false);
+                    var idx = i;
+                    threads[i] = new Thread(() =>
+                    {
+                        try
+                        {
+                            var writer = stdout is not null
+                                ? new StreamWriter(stdout, System.Text.Encoding.UTF8) { AutoFlush = true }
+                                : null;
+
+                            var origOut = Console.Out;
+                            OutputCapture.Push();
+                            try
+                            {
+                                if (writer is not null)
+                                    Console.SetOut(writer);
+                                stageExitCodes[idx] = _interpreter.Execute(cmd);
+                            }
+                            finally
+                            {
+                                Console.SetOut(origOut);
+                                OutputCapture.Pop();
+                                writer?.Flush();
+                                writer?.Dispose();
+                            }
+                        }
+                        catch (IOException) { stageExitCodes[idx] = 1; }
+                        catch (ObjectDisposedException) { stageExitCodes[idx] = 1; }
+                        catch (Exception ex) { stageErrors[idx] = ex; stageExitCodes[idx] = 1; }
+                        finally
+                        {
+                            completionEvents[idx]!.Set();
+                        }
+                    })
+                    { IsBackground = true };
+                    threads[i]!.Start();
+                }
+                else
+                {
+                    var simpleCommand = (SimpleCommandNode)cmd;
+                    var expandedWords = ExpandWords(simpleCommand);
+
+                    if (expandedWords.Count == 0)
+                    {
+                        // Assignment-only command in pipeline
+                        foreach (var assignment in simpleCommand.Assignments)
+                        {
+                            var value = _expander.ExpandString(assignment.Value);
+                            _context.SetVariable(assignment.Name, value);
+                        }
+                        stageExitCodes[i] = 0;
+
+                        // Close the pipe writer so downstream stages see EOF
+                        if (stdout is AnonymousPipeServerStream ps)
+                            ps.Dispose();
+                        continue;
+                    }
+
+                    var commandName = expandedWords[0];
+
+                    if (_builtins.IsBuiltin(commandName))
+                    {
+                        // ── Builtin in pipeline ──
+                        completionEvents[i] = new ManualResetEventSlim(false);
+                        var idx = i;
+                        threads[i] = new Thread(() =>
+                        {
+                            try
+                            {
+                                var writer = stdout is not null
+                                    ? new StreamWriter(stdout, System.Text.Encoding.UTF8) { AutoFlush = true }
+                                    : null;
+
+                                var origOut = Console.Out;
+                                OutputCapture.Push();
+                                try
+                                {
+                                    if (writer is not null)
+                                        Console.SetOut(writer);
+                                    _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out stageExitCodes[idx]);
+                                }
+                                finally
+                                {
+                                    Console.SetOut(origOut);
+                                    OutputCapture.Pop();
+                                    writer?.Flush();
+                                    writer?.Dispose();
+                                }
+                            }
+                            catch (IOException) { stageExitCodes[idx] = 1; }
+                            catch (ObjectDisposedException) { stageExitCodes[idx] = 1; }
+                            catch (Exception ex) { stageErrors[idx] = ex; stageExitCodes[idx] = 1; }
+                            finally
+                            {
+                                completionEvents[idx]!.Set();
+                            }
+                        })
+                        { IsBackground = true };
+                        threads[i]!.Start();
+                    }
+                    else if (_context.HasFunction(commandName))
+                    {
+                        // ── Shell function in pipeline ──
+                        completionEvents[i] = new ManualResetEventSlim(false);
+                        var idx = i;
+                        threads[i] = new Thread(() =>
+                        {
+                            try
+                            {
+                                var writer = stdout is not null
+                                    ? new StreamWriter(stdout, System.Text.Encoding.UTF8) { AutoFlush = true }
+                                    : null;
+
+                                var origOut = Console.Out;
+                                OutputCapture.Push();
+                                try
+                                {
+                                    if (writer is not null)
+                                        Console.SetOut(writer);
+                                    stageExitCodes[idx] = _interpreter.ExecuteFunction(commandName, expandedWords);
+                                }
+                                finally
+                                {
+                                    Console.SetOut(origOut);
+                                    OutputCapture.Pop();
+                                    writer?.Flush();
+                                    writer?.Dispose();
+                                }
+                            }
+                            catch (IOException) { stageExitCodes[idx] = 1; }
+                            catch (ObjectDisposedException) { stageExitCodes[idx] = 1; }
+                            catch (Exception ex) { stageErrors[idx] = ex; stageExitCodes[idx] = 1; }
+                            finally
+                            {
+                                completionEvents[idx]!.Set();
+                            }
+                        })
+                        { IsBackground = true };
+                        threads[i]!.Start();
+                    }
+                    else
+                    {
+                        // ── External command in pipeline ──
+                        var stderrSink = (isLast && lastHasStderrToStdout) ? stdout : null;
+
+                        // For the last stage with no stdout pipe (output to console),
+                        // capture to a MemoryStream so we can write it to Console.Out
+                        // (which may have been redirected by the test harness or command substitution)
+                        Stream? effectiveStdout = stdout;
+                        if (isLast && stdout is null)
+                        {
+                            var capturedMs = new MemoryStream();
+                            lastStdoutCapture[0] = capturedMs;
+                            effectiveStdout = capturedMs;
+                        }
+
+                        var (proc, stdoutTask, _) = _processManager.StartConcurrent(
+                            commandName, expandedWords.ToArray(), _context,
+                            stdin, effectiveStdout, stderrSink);
+
+                        processes[i] = proc;
+                        stdoutTasks[i] = stdoutTask;
+
+                        if (proc is null)
+                        {
+                            ColorOutput.WriteError($"{commandName}: command not found");
+                            stageExitCodes[i] = 127;
+
+                            // Close pipe writer so downstream stages see EOF
+                            if (stdout is AnonymousPipeServerStream ps)
+                                ps.Dispose();
+                        }
+                    }
+                }
             }
 
-            // Determine stdout for this stage
-            var isLast = i == processCount - 1;
-            Stream? stdoutFile = null;
-            if (isLast && cmd is SimpleCommandNode scN)
+            // ── 4. Wait for all stages ──
+            for (var i = 0; i < stageCount; i++)
             {
-                var stdoutRedirect = GetStdoutRedirect(scN);
-                if (stdoutRedirect is not null)
+                if (processes[i] is not null)
                 {
-                    var (file, append) = stdoutRedirect.Value;
-                    stdoutFile = new FileStream(file, append ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None);
+                    processes[i]!.WaitForExit();
+                    stageExitCodes[i] = processes[i]!.ExitCode;
+
+                    // Wait for stdout copy task to complete so all data is in the sink stream
+                    if (stdoutTasks[i] is not null)
+                    {
+                        try { stdoutTasks[i]!.Wait(); } catch { }
+                    }
+                }
+                else if (completionEvents[i] is not null)
+                {
+                    completionEvents[i]!.Wait();
                 }
             }
 
-            // Execute the stage
-            if (cmd is not SimpleCommandNode)
+            // ── 5. Handle last-stage console output ──
+            // If the last stage was external with no stdout pipe, write captured
+            // output to Console.Out (which may have been redirected).
+            if (lastStdoutCapture[0] is { } capture)
             {
-                var captured = new StringWriter();
-                var origOut = Console.Out;
-                OutputCapture.Push();
-                try
-                {
-                    Console.SetOut(captured);
-                    lastExitCode = _interpreter.Execute(cmd);
-                }
-                finally
-                {
-                    Console.SetOut(origOut);
-                    OutputCapture.Pop();
-                }
-
-                var output = captured.ToString();
-                if (stdoutFile is not null)
-                {
-                    var bytes = System.Text.Encoding.UTF8.GetBytes(output);
-                    stdoutFile.Write(bytes, 0, bytes.Length);
-                    pipeData = null;
-                }
-                else if (isLast)
-                {
+                var output = System.Text.Encoding.UTF8.GetString(capture.ToArray());
+                if (!string.IsNullOrEmpty(output))
                     Console.Write(output);
-                    pipeData = null;
-                }
-                else
-                {
-                    pipeData = System.Text.Encoding.UTF8.GetBytes(output);
-                }
             }
-            else
+
+            lastExitCode = stageExitCodes[stageCount - 1];
+        }
+        finally
+        {
+            // ── 6. Cleanup ──
+            for (var i = 0; i < stageCount; i++)
             {
-                var simpleCommand = (SimpleCommandNode)cmd;
-                var expandedWords = ExpandWords(simpleCommand);
-
-                if (expandedWords.Count == 0)
-                {
-                    lastExitCode = 0;
-                    pipeData = null;
-                    stdinStream?.Dispose();
-                    stdoutFile?.Dispose();
-                    continue;
-                }
-
-                var commandName = expandedWords[0];
-
-                if (_builtins.IsBuiltin(commandName))
-                {
-                    var captured = new StringWriter();
-                    var origOut = Console.Out;
-                    OutputCapture.Push();
-                    try
-                    {
-                        Console.SetOut(captured);
-                        _ = _builtins.TryExecute(commandName, expandedWords.ToArray(), _context, out lastExitCode);
-                    }
-                    finally
-                    {
-                        Console.SetOut(origOut);
-                        OutputCapture.Pop();
-                    }
-
-                    var output = captured.ToString();
-                    if (stdoutFile is not null)
-                    {
-                        var bytes = System.Text.Encoding.UTF8.GetBytes(output);
-                        stdoutFile.Write(bytes, 0, bytes.Length);
-                        pipeData = null;
-                    }
-                    else if (isLast)
-                    {
-                        Console.Write(output);
-                        pipeData = null;
-                    }
-                    else
-                    {
-                        pipeData = System.Text.Encoding.UTF8.GetBytes(output);
-                    }
-                }
-                else if (_context.HasFunction(commandName))
-                {
-                    var captured = new StringWriter();
-                    var origOut = Console.Out;
-                    OutputCapture.Push();
-                    try
-                    {
-                        Console.SetOut(captured);
-                        lastExitCode = _interpreter.ExecuteFunction(commandName, expandedWords);
-                    }
-                    finally
-                    {
-                        Console.SetOut(origOut);
-                        OutputCapture.Pop();
-                    }
-
-                    var output = captured.ToString();
-                    if (stdoutFile is not null)
-                    {
-                        var bytes = System.Text.Encoding.UTF8.GetBytes(output);
-                        stdoutFile.Write(bytes, 0, bytes.Length);
-                        pipeData = null;
-                    }
-                    else if (isLast)
-                    {
-                        Console.Write(output);
-                        pipeData = null;
-                    }
-                    else
-                    {
-                        pipeData = System.Text.Encoding.UTF8.GetBytes(output);
-                    }
-                }
-                else
-                {
-                    // External command — run with captured output for pipeline plumbing
-                    var capturedMs = new MemoryStream();
-                    var process = _processManager.StartProcess(
-                        commandName,
-                        expandedWords.ToArray(),
-                        _context,
-                        stdinStream,
-                        isLast && stdoutFile is not null ? stdoutFile : capturedMs,
-                        wireStdoutAsync: false);
-
-                    if (process is null)
-                    {
-                        ColorOutput.WriteError($"{commandName}: command not found");
-                        lastExitCode = 127;
-                        pipeData = null;
-                    }
-                    else
-                    {
-                        process.WaitForExit();
-                        lastExitCode = process.ExitCode;
-
-                        if (stdoutFile is not null)
-                        {
-                            pipeData = null;
-                        }
-                        else if (isLast)
-                        {
-                            var output = System.Text.Encoding.UTF8.GetString(capturedMs.ToArray());
-                            if (!string.IsNullOrEmpty(output))
-                                Console.Write(output);
-                            pipeData = null;
-                        }
-                        else
-                        {
-                            pipeData = capturedMs.ToArray();
-                        }
-
-                        process.Dispose();
-                    }
-                }
+                try { processes[i]?.Dispose(); } catch { }
+                try { pipeWriters[i]?.Dispose(); } catch { }
+                try { pipeReaders[i]?.Dispose(); } catch { }
+                completionEvents[i]?.Dispose();
             }
-
-            stdinStream?.Dispose();
-            stdoutFile?.Dispose();
+            firstStdinFile?.Dispose();
+            lastStdoutFile?.Dispose();
+            lastStdoutCapture[0]?.Dispose();
         }
 
         return lastExitCode;

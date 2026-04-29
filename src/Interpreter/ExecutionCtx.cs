@@ -320,10 +320,10 @@ public sealed class ShellContext
             }
         }
 
-        // Variable doesn't exist yet — create it with export flag
-        var newVar = new ShellVariable { IsExported = true };
+        // Variable doesn't exist yet — create it with export flag, preserving any existing OS environment value
+        var existingValue = Environment.GetEnvironmentVariable(name) ?? string.Empty;
+        var newVar = new ShellVariable { IsExported = true, Value = existingValue };
         CurrentScope[name] = newVar;
-        Environment.SetEnvironmentVariable(name, string.Empty);
     }
 
     /// <summary>
