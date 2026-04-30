@@ -3,13 +3,40 @@
     <PropertyGroup>
         <OutputType>Exe</OutputType>
         <TargetFramework>net10.0</TargetFramework>
-        <ImplicitUsings>enable</ImplicitUsings>
+        <ImplicitUsings>disable</ImplicitUsings>
         <Nullable>enable</Nullable>
-        <Version>1.0.1</Version>
-        <PublishReadyToRun>true</PublishReadyToRun>
-        <SelfContained>true</SelfContained>
-        <PublishSingleFile>true</PublishSingleFile>
+        <Version>1.2.3</Version>
+        <PublishAot>true</PublishAot>
         <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+
+        <!-- Low-memory GC tuning for shell workloads -->
+        <ServerGarbageCollection>false</ServerGarbageCollection>
+
+        <!-- Strip unused runtime subsystems -->
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <StackTraceSupport>false</StackTraceSupport>
+        <EventSourceSupport>false</EventSourceSupport>
+        <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+        <UseSystemResourceKeys>true</UseSystemResourceKeys>
+        <DebuggerSupport>false</DebuggerSupport>
+        <MetricsSupport>false</MetricsSupport>
+        <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+        <Http3Support>false</Http3Support>
+        <DynamicCodeSupport>false</DynamicCodeSupport>
+        <OptimizationPreference>Size</OptimizationPreference>
+
+        <!-- Build profile: define RADIANCE_CORE always, plus feature flags for Full build -->
+        <DefineConstants>RADIANCE_CORE</DefineConstants>
+    </PropertyGroup>
+
+    <!-- Full build: all features enabled (default for interactive use) -->
+    <PropertyGroup Condition="'$(RadianceBuild)' == 'Full' Or '$(RadianceBuild)' == ''">
+        <DefineConstants>RADIANCE_CORE;RADIANCE_DAVINCI;RADIANCE_MUX;RADIANCE_THEMES</DefineConstants>
+    </PropertyGroup>
+
+    <!-- Core build: minimal shell for scripts and system use -->
+    <PropertyGroup Condition="'$(RadianceBuild)' == 'Core'">
+        <DefineConstants>RADIANCE_CORE</DefineConstants>
     </PropertyGroup>
 
     <ItemGroup>
@@ -18,7 +45,18 @@
         <Compile Remove="DaVinci.Tests\**" />
     </ItemGroup>
 
-    <ItemGroup>
+    <!-- Exclude optional feature sources in Core build -->
+    <ItemGroup Condition="'$(RadianceBuild)' == 'Core'">
+        <Compile Remove="src\Multiplexer\**" />
+        <Compile Remove="src\Themes\**" />
+        <Compile Remove="src\Terminal\ConsoleTerminal.cs" />
+        <Compile Remove="src\Terminal\DaVinciRenderer.cs" />
+        <Compile Remove="src\Terminal\DaVinciViewBuilder.cs" />
+        <Compile Remove="src\Builtins\ThemeCommand.cs" />
+    </ItemGroup>
+
+    <!-- DaVinci project reference only for Full build -->
+    <ItemGroup Condition="'$(RadianceBuild)' != 'Core'">
         <ProjectReference Include="DaVinci\DaVinci.csproj" />
     </ItemGroup>
 

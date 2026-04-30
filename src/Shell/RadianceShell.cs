@@ -5,8 +5,12 @@ using Radiance.Interpreter;
 using Radiance.Lexer;
 using Radiance.Parser;
 using Radiance.Plugins;
+#if RADIANCE_DAVINCI
 using Radiance.Terminal;
+#endif
+#if RADIANCE_THEMES
 using Radiance.Themes;
+#endif
 using Radiance.Utils;
 
 namespace Radiance.Shell;
@@ -28,9 +32,16 @@ public sealed class RadianceShell
     private readonly ShellInterpreter _interpreter;
     private readonly History _history;
     private readonly PluginManager _pluginManager;
-    private readonly ThemeManager _themeManager = new();
-    private readonly SessionStats _sessionStats = new();
-    private readonly DaVinciRenderer _daVinci = new();
+#if RADIANCE_THEMES
+    private ThemeManager? _themeManager;
+    private ThemeManager ThemeManager => _themeManager ??= CreateThemeManager();
+#endif
+    private SessionStats? _sessionStats;
+    private SessionStats SessionStats => _sessionStats ??= new();
+#if RADIANCE_DAVINCI
+    private DaVinciRenderer? _daVinci;
+    private DaVinciRenderer DaVinci => _daVinci ??= new();
+#endif
     private readonly SignalHandler _signalHandler = new();
     private readonly bool _isLoginShell;
     private bool _running = true;
@@ -53,7 +64,7 @@ public sealed class RadianceShell
     /// </summary>
     private List<string>? _pathExecutableCache;
     private DateTime _pathCacheTime = DateTime.MinValue;
-    private static readonly TimeSpan PathCacheTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PathCacheTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Block-opening keywords that require a matching closer.
@@ -141,16 +152,10 @@ public sealed class RadianceShell
         // Wire up command line executor callback for the exec builtin
         _context.CommandLineExecutor = ExecuteCommandLine;
 
-        // Initialize theme system
-        _themeManager.Initialize();
-
         // Initialize plugin system
         _pluginManager = new PluginManager(_context, _builtins);
         var pluginCmd = new PluginCommand { Manager = _pluginManager };
         _builtins.Register(pluginCmd);
-
-        // Register theme command
-        _builtins.Register(new ThemeCommand(_themeManager));
 
         // Wire up signal handler
         _signalHandler.Context = _context;
@@ -174,11 +179,23 @@ public sealed class RadianceShell
         // Wire up radiance command with session stats and version
         if (_builtins.TryGetCommand("radiance") is RadianceCommand radianceCmd)
         {
-            radianceCmd.Stats = _sessionStats;
+            radianceCmd.Stats = SessionStats;
             radianceCmd.Version = Version;
-            radianceCmd.DaVinci = _daVinci;
+#if RADIANCE_DAVINCI
+            radianceCmd.DaVinci = DaVinci;
+#endif
         }
     }
+
+#if RADIANCE_THEMES
+    private ThemeManager CreateThemeManager()
+    {
+        var tm = new ThemeManager();
+        tm.Initialize();
+        _builtins.Register(new ThemeCommand(tm));
+        return tm;
+    }
+#endif
 
     /// <summary>
     /// Starts the interactive REPL loop.
@@ -847,7 +864,7 @@ public sealed class RadianceShell
 
         if (cmdEnd > 0)
         {
-            _sessionStats.RecordCommand(trimmedInput[..cmdEnd]);
+            SessionStats.RecordCommand(trimmedInput[..cmdEnd]);
         }
 
         try
@@ -2190,19 +2207,25 @@ public sealed class RadianceShell
         var ps1 = _context.GetVariable("PS1");
         if (!string.IsNullOrEmpty(ps1))
         {
-            return PromptExpander.Expand(ps1, _context, _history.Count, _sessionStats.CommandCount);
+            return PromptExpander.Expand(ps1, _context, _history.Count, SessionStats.CommandCount);
         }
 
+#if RADIANCE_THEMES
         var ctx = BuildPromptContext();
-        var leftPrompt = _themeManager.RenderPrompt(ctx);
-        var rightPrompt = _themeManager.RenderRightPrompt(ctx);
+        var leftPrompt = ThemeManager.RenderPrompt(ctx);
+        var rightPrompt = ThemeManager.RenderRightPrompt(ctx);
 
         if (string.IsNullOrEmpty(rightPrompt))
             return leftPrompt;
 
         return rightPrompt + leftPrompt;
+#else
+        // Fallback prompt when themes are not compiled in
+        return PromptExpander.Expand("\\u@\\h:\\w$ ", _context, _history.Count, SessionStats.CommandCount);
+#endif
     }
 
+#if RADIANCE_THEMES
     /// <summary>
     /// Builds a PromptContext from the current shell state.
     /// </summary>
@@ -2227,7 +2250,8 @@ public sealed class RadianceShell
     /// <summary>
     /// Gets the active theme manager instance.
     /// </summary>
-    public ThemeManager Themes => _themeManager;
+    public ThemeManager Themes => ThemeManager;
+#endif
 
     // ═══════════════════════════════════════════════════════════════════════
     // Initialization
@@ -2265,19 +2289,20 @@ public sealed class RadianceShell
     /// </summary>
     private void PrintWelcome()
     {
+#if RADIANCE_DAVINCI
         if (Console.IsOutputRedirected || Console.IsInputRedirected)
         {
             // Fallback for piped/redirected mode
             Console.WriteLine();
             Console.WriteLine($"\x1b[1;33m  ✦ Radiance Shell v{Version} ✦\x1b[0m");
-            Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun, 'agent' for AI help!\x1b[0m");
+            Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun!\x1b[0m");
             Console.WriteLine();
             return;
         }
 
         try
         {
-            _daVinci.ShowStaticView((buf, w, h) =>
+            DaVinci.ShowStaticView((buf, w, h) =>
                 DaVinciViewBuilder.RenderWelcomeBanner(buf, w, h, Version));
         }
         catch
@@ -2285,8 +2310,14 @@ public sealed class RadianceShell
             // Fallback if alt screen buffer is not supported
             Console.WriteLine();
             Console.WriteLine($"\x1b[1;33m  ✦ Radiance Shell v{Version} ✦\x1b[0m");
-            Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun, 'agent' for AI help!\x1b[0m");
+            Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun!\x1b[0m");
             Console.WriteLine();
         }
+#else
+        Console.WriteLine();
+        Console.WriteLine($"\x1b[1;33m  ✦ Radiance Shell v{Version} ✦\x1b[0m");
+        Console.WriteLine("\x1b[37m  Type 'exit' to quit. Try 'radiance' for fun!\x1b[0m");
+        Console.WriteLine();
+#endif
     }
 }

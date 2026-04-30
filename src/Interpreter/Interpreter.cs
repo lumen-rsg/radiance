@@ -565,7 +565,8 @@ public sealed class ShellInterpreter : IAstVisitor<int>
     /// <summary>
     /// Cache of case-pattern regex objects to avoid recompilation.
     /// </summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> CaseRegexCache = new();
+    private static readonly ConcurrentDictionary<string, Regex> CaseRegexCache = new();
+    private const int MaxCaseRegexCacheSize = 64;
 
     /// <summary>
     /// Matches a string against a case pattern using glob-style matching.
@@ -590,6 +591,11 @@ public sealed class ShellInterpreter : IAstVisitor<int>
             var patternStr = CaseGlobToRegex(p);
             return new Regex($"^{patternStr}$", RegexOptions.IgnoreCase);
         });
+        if (CaseRegexCache.Count > MaxCaseRegexCacheSize)
+        {
+            foreach (var key in CaseRegexCache.Keys.Take(CaseRegexCache.Count / 2).ToList())
+                CaseRegexCache.TryRemove(key, out _);
+        }
         return regex.IsMatch(value);
     }
 

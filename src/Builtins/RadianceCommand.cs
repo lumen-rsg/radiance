@@ -1,6 +1,8 @@
 using Radiance.Interpreter;
-using Radiance.Terminal;
 using Radiance.Utils;
+#if RADIANCE_DAVINCI
+using Radiance.Terminal;
+#endif
 
 namespace Radiance.Builtins;
 
@@ -37,17 +39,20 @@ public sealed class RadianceCommand : IBuiltinCommand
     /// </summary>
     public string Version { get; set; } = "1.0.0";
 
+#if RADIANCE_DAVINCI
     /// <summary>
     /// The DaVinci renderer for rich terminal views.
     /// Must be set before the command is executed.
     /// </summary>
     public DaVinciRenderer? DaVinci { get; set; }
+#endif
 
     /// <inheritdoc />
     public int Execute(string[] args, ShellContext context)
     {
         var subcommand = args.Length > 1 ? args[1].ToLowerInvariant() : "";
 
+#if RADIANCE_DAVINCI
         // If DaVinci is not available or terminal is redirected, fall back to SparkleRenderer
         if (DaVinci is null || Console.IsOutputRedirected)
         {
@@ -108,6 +113,10 @@ public sealed class RadianceCommand : IBuiltinCommand
             // Fall back to SparkleRenderer if DaVinci fails
             return ExecuteFallback(subcommand);
         }
+#else
+        // No DaVinci — always use SparkleRenderer fallback
+        return ExecuteFallback(subcommand);
+#endif
     }
 
     /// <summary>

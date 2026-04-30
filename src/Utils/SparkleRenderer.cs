@@ -517,7 +517,7 @@ public class SessionStats
         CommandCount++;
         if (CommandFrequency.ContainsKey(commandName))
             CommandFrequency[commandName]++;
-        else
+        else if (CommandFrequency.Count < 50)
             CommandFrequency[commandName] = 1;
     }
 }

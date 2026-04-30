@@ -1,7 +1,19 @@
-﻿using System.Net.Sockets;
-using Radiance.Multiplexer;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Runtime;
+using System.Threading;
 using Radiance.Shell;
+#if RADIANCE_MUX
+using System.Net.Sockets;
+using Radiance.Multiplexer;
+#endif
+#if RADIANCE_DAVINCI
 using Radiance.Terminal;
+#endif
 using Radiance.Utils;
 
 namespace Radiance;
@@ -27,6 +39,12 @@ public static class Program
 
     public static int Main(string[] args)
     {
+        // Low-memory GC tuning for shell workloads
+        GCSettings.LatencyMode = GCLatencyMode.Batch;
+        GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+
+        MemoryDiagnostics.Snapshot("startup");
+
         var isLoginShell = false;
 
         // Detect login shell: argv[0] starts with '-' (e.g., -radiance) or -l/--login flag
@@ -127,6 +145,7 @@ public static class Program
             return shell.ExecuteString(command, commandArgs.ToArray());
         }
 
+#if RADIANCE_MUX
         // Handle --mux multiplexer mode
         if (args.Length > 0 && args[0] == "--mux")
         {
@@ -143,6 +162,13 @@ public static class Program
             }
             return RunMuxDaemon(args[1], args[2]);
         }
+#else
+        if (args.Length > 0 && args[0] is "--mux" or "--mux-daemon")
+        {
+            ColorOutput.WriteError("Multiplexer not available in this build (use Full build)");
+            return 1;
+        }
+#endif
 
         // Handle script file execution
         if (args.Length > 0 && !args[0].StartsWith('-'))
@@ -168,7 +194,9 @@ public static class Program
 
         // Interactive REPL mode
         var interactiveShell = new RadianceShell(isLoginShell);
-        return interactiveShell.Run();
+        var exitCode = interactiveShell.Run();
+        MemoryDiagnostics.Snapshot("exit");
+        return exitCode;
     }
 
     /// <summary>
@@ -176,6 +204,7 @@ public static class Program
     /// </summary>
     private static void PrintUsage()
     {
+#if RADIANCE_MUX
         Console.WriteLine($"""
             Radiance Shell v{Version} — A BASH interpreter in C#
 
@@ -196,8 +225,28 @@ public static class Program
               -h, --help      Show this help message
               -v, --version   Show version information
             """);
+#else
+        Console.WriteLine($"""
+            Radiance Shell v{Version} — A BASH interpreter in C#
+
+            Usage:
+              radiance                    Launch interactive REPL
+              radiance -l, --login        Launch as a login shell
+              radiance script.sh [args]   Execute a script file
+              radiance -c "command"       Execute an inline command
+              radiance --help             Show this help message
+              radiance --version          Show version information
+
+            Options:
+              -l, --login     Run as a login shell (sources /etc/profile, ~/.bash_profile)
+              -c <command>    Execute the given command string
+              -h, --help      Show this help message
+              -v, --version   Show version information
+            """);
+#endif
     }
 
+#if RADIANCE_MUX
     /// <summary>
     /// Run the terminal multiplexer.
     /// </summary>
@@ -230,10 +279,10 @@ public static class Program
                     // Try to connect — if it fails, the socket is stale
                     try
                     {
-                        using var testSock = new System.Net.Sockets.Socket(
-                            System.Net.Sockets.AddressFamily.Unix,
-                            System.Net.Sockets.SocketType.Stream,
-                            System.Net.Sockets.ProtocolType.Unspecified);
+                        using var testSock = new Socket(
+                            AddressFamily.Unix,
+                            SocketType.Stream,
+                            ProtocolType.Unspecified);
                         testSock.Connect(new UnixDomainSocketEndPoint(existingSocket));
                         testSock.Close();
                         // Connection succeeded — session is alive
@@ -248,7 +297,7 @@ public static class Program
                 }
 
                 // Spawn daemon process: radiance --mux-daemon <name> <shell>
-                using var daemon = new System.Diagnostics.Process();
+                using var daemon = new Process();
                 daemon.StartInfo.FileName = daemonExe;
                 daemon.StartInfo.Arguments = $"--mux-daemon \"{sessionName}\" \"{shell}\"";
                 daemon.StartInfo.UseShellExecute = false;
@@ -261,7 +310,7 @@ public static class Program
                 }
 
                 // Give the daemon a moment to create the socket
-                System.Threading.Thread.Sleep(200);
+                Thread.Sleep(200);
 
                 // Connect as a client
                 using var client = new MuxClient(sessionName);
@@ -287,7 +336,7 @@ public static class Program
                         if (lines.Length >= 3)
                         {
                             var pid = lines[0];
-                            var created = DateTime.Parse(lines[2], null, System.Globalization.DateTimeStyles.RoundtripKind);
+                            var created = DateTime.Parse(lines[2], null, DateTimeStyles.RoundtripKind);
                             details = $" (pid {pid}, created {created:HH:mm:ss})";
                         }
                     }
@@ -317,7 +366,7 @@ public static class Program
                 {
                     try
                     {
-                        System.Diagnostics.Process.GetProcessById(pid)?.Kill();
+                        Process.GetProcessById(pid)?.Kill();
                         Console.WriteLine($"Killed session '{targetName}' (pid {pid}).");
                     }
                     catch (Exception ex)
@@ -359,4 +408,5 @@ public static class Program
         daemon.Run();
         return 0;
     }
+#endif
 }

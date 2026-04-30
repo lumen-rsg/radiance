@@ -18,6 +18,7 @@ public sealed class GlobExpander
     /// Cache of compiled glob-to-regex patterns to avoid recompilation.
     /// </summary>
     private static readonly ConcurrentDictionary<string, Regex> RegexCache = new();
+    private const int MaxRegexCacheSize = 64;
 
     /// <summary>
     /// Expands glob patterns in the given text, returning one or more matching filenames.
@@ -299,7 +300,13 @@ public sealed class GlobExpander
 
         var patternStr = sb.ToString();
         var cacheKey = options?.ExtGlob == true ? $"ext:{pattern}" : pattern;
-        return RegexCache.GetOrAdd(cacheKey, _ => new Regex(patternStr, RegexOptions.None));
+        var regex = RegexCache.GetOrAdd(cacheKey, _ => new Regex(patternStr, RegexOptions.None));
+        if (RegexCache.Count > MaxRegexCacheSize)
+        {
+            foreach (var key in RegexCache.Keys.Take(RegexCache.Count / 2).ToList())
+                RegexCache.TryRemove(key, out _);
+        }
+        return regex;
     }
 
     /// <summary>
