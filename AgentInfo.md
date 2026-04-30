@@ -30,7 +30,6 @@
 | Конфигурация (agent.json, env vars) | Готово |
 | Подсистема подтверждений (y/n для destructive tools) | Готово |
 | Slash-команды (/help, /exit, /reset, /config, /model, /history) | Готово |
-| DaVinci (React-подобная система отрисовки) | Не начато |
 | Оркестратор Truffaldino | Не начато |
 | Агент Carmine (планировка) | Не начато |
 | Агент Rhys (имплементация) | Не начато |
